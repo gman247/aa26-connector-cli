@@ -187,6 +187,60 @@ runtime:
 
 `network.egress` is advisory — the framework can derive a NetworkPolicy from it to harden the connector pod's egress. Wildcards allowed.
 
+## `spec.auth`
+
+Declares which authentication methods this connector accepts. Drives the **Credentials** section in the Add Source wizard. Connectors that don't need auth (web crawlers, public APIs) can omit this section entirely; the wizard hides the credentials panel when zero usable methods are declared.
+
+```yaml
+auth:
+  methods:
+    - type: none
+      displayName: "Anonymous (no credentials)"
+    - type: bearer
+      displayName: "Bearer token"
+      description: "Use a Personal Access Token from User Settings → Developer."
+      fields:
+        type: object
+        required: [token]
+        properties:
+          token:
+            type: string
+            x-display: "Token"
+            x-secret: true
+    - type: basic
+      displayName: "Username + password"
+      fields:
+        type: object
+        required: [username, password]
+        properties:
+          username: { type: string, x-display: "Username" }
+          password: { type: string, x-display: "Password", x-secret: true }
+    - type: service_account
+      displayName: "Existing service account"
+      accountTypes: [username_password, client_id_secret]
+  scope: per-source
+```
+
+### Method types
+
+| `type` | Behavior |
+|---|---|
+| `none` | Connector takes no credentials. Wizard skips the Credentials section entirely if this is the only method declared. |
+| `basic` / `bearer` / `api_key` | Inline credentials. The wizard renders the method's `fields` JSON Schema; values land in a per-source k8s Secret created by `ConnectorAuthHandler`. |
+| `service_account` | Reuses AA26's existing Service Account picker. `accountTypes` (optional) restricts the picker to specific SA flavors. |
+| `custom` | Same as inline but for connector-specific shapes that don't fit basic/bearer/api_key. Fields are arbitrary; what gets stored is opaque to the framework. |
+
+### `scope`
+
+| Value | Meaning |
+|---|---|
+| `per-source` (default) | Each Source in the group gets its own credentials. Right for SaaS apps with per-instance tokens (Databricks PAT, Box token). |
+| `per-group` | One credential bundle covers every Source in the group. Right for AD bind credentials, file-server CIFS credentials. |
+
+### Cluster policy
+
+Operators can restrict which methods the wizard offers via the `allowed_connector_auth_methods` AppSetting (comma-separated list). The wizard filters its dropdown to that list, and the backend independently rejects POSTs that try to use a disallowed type.
+
 ## `spec.permissions`
 
 What your connector is allowed to emit. The sidecar enforces this at admission time.
