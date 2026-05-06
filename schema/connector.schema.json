@@ -1,0 +1,220 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://connectors.netwrix.io/schema/connector.schema.json",
+  "title": "Connector Manifest",
+  "description": "Declarative manifest for a Netwrix DSPM connector. Lives at the root of a connector source tree as connector.yaml. Single source of truth for the source_types row, Setup form, runtime image binding, and capability gating.",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "connectors.netwrix.io/v1"
+    },
+    "kind": {
+      "type": "string",
+      "const": "Connector"
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["name", "displayName", "version"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{1,62}[a-z0-9]$",
+          "description": "Globally unique slug. Lowercase, hyphen-separated. Becomes source_types.name."
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Shown in the Add Connector picker."
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+([-+][0-9A-Za-z.-]+)?$",
+          "description": "Semver. Becomes source_types.version."
+        },
+        "vendor": {
+          "type": "string",
+          "default": "local",
+          "description": "netwrix | community | local | <org>"
+        },
+        "icon": {
+          "type": "string",
+          "description": "Path (relative to manifest) to an SVG/PNG icon."
+        },
+        "description": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "spec": {
+      "type": "object",
+      "required": ["image", "capabilities"],
+      "properties": {
+        "image": {
+          "type": "object",
+          "required": ["repository"],
+          "properties": {
+            "repository": {
+              "type": "string",
+              "description": "OCI image reference without tag/digest, e.g. ghcr.io/netwrix/connectors/box."
+            },
+            "tag":    { "type": "string" },
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$",
+              "description": "Required for signed installs (Phase 3). Optional in prototype."
+            },
+            "pullPolicy": {
+              "type": "string",
+              "enum": ["Always", "IfNotPresent", "Never"],
+              "default": "IfNotPresent"
+            },
+            "signing": {
+              "type": "object",
+              "description": "Cosign keyless or key-based signing config. Optional in prototype.",
+              "properties": {
+                "cosign": {
+                  "type": "object",
+                  "properties": {
+                    "certificateIdentity":   { "type": "string" },
+                    "certificateOidcIssuer": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "capabilities": {
+          "type": "object",
+          "required": ["operations"],
+          "properties": {
+            "scanTypes": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["access_scan", "sensitive_data_scan", "sync"]
+              },
+              "uniqueItems": true,
+              "description": "Which scan types this connector supports. Drives the buttons rendered for a Source."
+            },
+            "operations": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "enum": ["test_connection", "discover", "scan", "fetch", "apply"]
+              },
+              "uniqueItems": true,
+              "description": "Verbs the image dispatches at runtime. test_connection is conventionally always present."
+            },
+            "additionalProcesses": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["key", "displayName"],
+                "properties": {
+                  "key": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+                  "displayName": { "type": "string" },
+                  "description": { "type": "string" }
+                },
+                "additionalProperties": false
+              },
+              "description": "Optional post-processing handlers callable via run-process."
+            }
+          }
+        },
+        "credentials": {
+          "type": "object",
+          "description": "Credential schema. Drives the Service Account form. Stored as a k8s Secret reference at runtime.",
+          "required": ["schema"],
+          "properties": {
+            "schema": { "$ref": "#/$defs/jsonSchemaSubset" }
+          }
+        },
+        "source": {
+          "type": "object",
+          "description": "Per-source configuration schema. Drives the Create Source form.",
+          "required": ["schema"],
+          "properties": {
+            "schema": { "$ref": "#/$defs/jsonSchemaSubset" }
+          }
+        },
+        "scan": {
+          "type": "object",
+          "description": "Per-scan-execution config schema. Drives any per-execution overrides.",
+          "properties": {
+            "schema": { "$ref": "#/$defs/jsonSchemaSubset" }
+          }
+        },
+        "resources": {
+          "type": "object",
+          "description": "k8s resource requests/limits applied to the connector pod.",
+          "properties": {
+            "requests": { "$ref": "#/$defs/resourceMap" },
+            "limits":   { "$ref": "#/$defs/resourceMap" }
+          }
+        },
+        "runtime": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["container"],
+              "default": "container",
+              "description": "Only 'container' supported in v1. Wasm reserved for future."
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 14400
+            },
+            "network": {
+              "type": "object",
+              "properties": {
+                "egress": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "FQDNs the connector needs to reach. Advisory NetworkPolicy generated from this."
+                }
+              }
+            }
+          }
+        },
+        "permissions": {
+          "type": "object",
+          "description": "What the connector is allowed to emit. Sidecar enforces.",
+          "properties": {
+            "findingTypes": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^(access_grant|object_metadata|sensitive_match|custom:[a-z][a-z0-9_.-]*)$"
+              },
+              "uniqueItems": true,
+              "description": "Allowed values for the 'type' field of findings. Three built-ins; custom: prefix for extensions."
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "jsonSchemaSubset": {
+      "type": "object",
+      "description": "Embedded JSON Schema used to render forms. Validates as a JSON Schema document.",
+      "properties": {
+        "type":       { "type": "string" },
+        "required":   { "type": "array", "items": { "type": "string" } },
+        "properties": { "type": "object" }
+      }
+    },
+    "resourceMap": {
+      "type": "object",
+      "patternProperties": {
+        "^(cpu|memory|ephemeral-storage)$": { "type": ["string", "number"] }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,33 @@
+apiVersion: connectors.netwrix.io/v1
+kind: Connector
+metadata:
+  name: demo-fs
+  displayName: Demo Filesystem
+  version: 0.1.0
+  vendor: local
+  description: |
+    Reference connector — scans a local directory and emits one
+    object_metadata finding per file. Used as the docs example and the
+    end-to-end smoke target.
+spec:
+  image:
+    repository: localhost/connector-prototype/demo-fs
+    tag: dev
+    pullPolicy: Never
+  capabilities:
+    operations: [test_connection, scan]
+    scanTypes: [access_scan]
+  credentials:
+    schema:
+      type: object
+      properties: {}
+  source:
+    schema:
+      type: object
+      required: [rootPath]
+      properties:
+        rootPath:
+          type: string
+          x-display: "Root path"
+  permissions:
+    findingTypes: [object_metadata, access_grant]

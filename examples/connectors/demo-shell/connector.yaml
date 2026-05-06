@@ -1,0 +1,34 @@
+apiVersion: connectors.netwrix.io/v1
+kind: Connector
+metadata:
+  name: demo-shell
+  displayName: Demo Shell
+  version: 0.1.0
+  vendor: local
+  description: |
+    A connector implemented entirely in bash + curl + jq. Proves the
+    runtime contract is honestly language-agnostic — this connector knows
+    nothing about Python, Go, gRPC, or any framework SDK. Featured in
+    docs/quickstart.md.
+spec:
+  image:
+    repository: localhost/connector-prototype/demo-shell
+    tag: dev
+    pullPolicy: Never
+  capabilities:
+    operations: [test_connection, scan]
+    scanTypes: [access_scan]
+  credentials:
+    schema:
+      type: object
+      properties: {}
+  source:
+    schema:
+      type: object
+      required: [rootPath]
+      properties:
+        rootPath:
+          type: string
+          x-display: "Root path"
+  permissions:
+    findingTypes: [object_metadata]
