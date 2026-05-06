@@ -195,6 +195,56 @@
               "description": "Allowed values for the 'type' field of findings. Three built-ins; custom: prefix for extensions."
             }
           }
+        },
+        "auth": {
+          "type": "object",
+          "description": "Authentication methods this connector accepts. Drives the 'Auth Type' picker in the Add Source wizard. Connectors that don't need auth (web crawler, public APIs) can omit the section entirely or declare a single method with type=none.",
+          "properties": {
+            "methods": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["type"],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": ["none", "basic", "bearer", "api_key", "service_account", "custom"],
+                    "description": "Auth model. 'none' for anonymous, 'basic'/'bearer'/'api_key' for inline credentials, 'service_account' to reuse the AA26 SA picker, 'custom' for connector-defined fields."
+                  },
+                  "displayName": {
+                    "type": "string",
+                    "description": "Label shown in the Auth Type dropdown."
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "Helper text shown below the dropdown when this method is selected."
+                  },
+                  "fields": {
+                    "$ref": "#/$defs/jsonSchemaSubset",
+                    "description": "Fields the user fills in when they pick this method (renders just like spec.source.schema). Standard JSON Schema with x-display, x-secret, etc. Use type=none to skip."
+                  },
+                  "accountTypes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": ["username_password", "client_id_secret", "ssh_private_key", "client_id_certificate"]
+                    },
+                    "description": "When type=service_account, restricts the SA picker to these flavors."
+                  }
+                },
+                "additionalProperties": false
+              },
+              "uniqueItems": true,
+              "description": "Available auth methods for this connector. If the array is empty or omitted, the wizard skips the auth step."
+            },
+            "scope": {
+              "type": "string",
+              "enum": ["per-source", "per-group"],
+              "default": "per-source",
+              "description": "per-source: each Source in the group gets its own credentials (Databricks PAT, Box token). per-group: one credential bundle covers every Source (AD bind credentials)."
+            }
+          },
+          "additionalProperties": false
         }
       }
     }
