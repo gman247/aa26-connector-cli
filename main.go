@@ -87,6 +87,8 @@ Usage:
         --runtime-image=IMG    Override the runtime image used by --real-runtime.
         --strict               Fail on lint warnings, not just lint errors.
         --skip-lint            Skip the lint pre-check.
+        --sample=N             Print the first N findings as pretty JSON after
+                               the summary (default 10; --no-sample to suppress).
 
   aa26-connector package [--out=FILE]
       Bundle the current directory into a deployable .tar.gz for upload
@@ -323,12 +325,14 @@ type testFlags struct {
 	runtimeImage   string
 	strict         bool
 	skipLint       bool
+	sampleCount    int // how many findings to print verbatim; 0 = off
 }
 
 func parseTestFlags(args []string) (testFlags, error) {
 	f := testFlags{
 		manifestPath: "connector.yaml",
 		fixturePath:  "test-fixture.yaml",
+		sampleCount:  10,
 	}
 	for _, a := range args {
 		switch {
@@ -350,6 +354,13 @@ func parseTestFlags(args []string) (testFlags, error) {
 			f.strict = true
 		case a == "--skip-lint":
 			f.skipLint = true
+		case strings.HasPrefix(a, "--sample="):
+			n, err := fmt.Sscanf(strings.TrimPrefix(a, "--sample="), "%d", &f.sampleCount)
+			if err != nil || n != 1 || f.sampleCount < 0 {
+				return f, fmt.Errorf("--sample= requires a non-negative integer")
+			}
+		case a == "--no-sample":
+			f.sampleCount = 0
 		case strings.HasPrefix(a, "--"):
 			return f, fmt.Errorf("unknown flag %q", a)
 		default:
@@ -847,6 +858,7 @@ func printSummary(r *RunResult, failures []string, m *manifestSummary, flags tes
 
 	printCoverage(r)
 	printErrorLogs(r)
+	printFindingSample(r, flags.sampleCount)
 
 	if isFirstCallFailure(r) {
 		printForensic(r, m, flags)
@@ -875,6 +887,41 @@ var coverageEndpoints = []struct{ Method, Path string }{
 	{"GET", "/v1/control"},
 	{"POST", "/v1/process"},
 	{"POST", "/v1/complete"},
+}
+
+// printFindingSample prints the first n findings as pretty-printed JSON so
+// authors can eyeball the shape of what the connector is emitting without
+// having to add external tooling. Invalid findings are flagged with ✗ and
+// their schema error is printed inline. Pass n=0 to suppress entirely.
+func printFindingSample(r *RunResult, n int) {
+	if n <= 0 || len(r.Findings) == 0 {
+		return
+	}
+	cap := n
+	if cap > len(r.Findings) {
+		cap = len(r.Findings)
+	}
+	label := fmt.Sprintf("first %d", cap)
+	if cap == len(r.Findings) {
+		label = "all"
+	}
+	fmt.Fprintf(os.Stderr, "  findings sample (%s of %d):\n", label, len(r.Findings))
+	for i, f := range r.Findings[:cap] {
+		mark := "✓"
+		if !f.ValidationOK {
+			mark = "✗"
+		}
+		// Pretty-print the raw JSON if it's valid JSON; fall back to raw string.
+		var pretty bytes.Buffer
+		if err := json.Indent(&pretty, []byte(f.Raw), "      ", "  "); err == nil {
+			fmt.Fprintf(os.Stderr, "    %s [%d] %s\n", mark, i+1, pretty.String())
+		} else {
+			fmt.Fprintf(os.Stderr, "    %s [%d] %s\n", mark, i+1, f.Raw)
+		}
+		if !f.ValidationOK {
+			fmt.Fprintf(os.Stderr, "        schema error: %s\n", f.ValidationErr)
+		}
+	}
 }
 
 func printCoverage(r *RunResult) {
