@@ -28,6 +28,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +41,12 @@ const (
 	// runtime/main.go envAddr / defaultAddr. Connectors hardcoding
 	// "127.0.0.1:8089" or "localhost:8089" work without modification.
 	emulatorAddr = "127.0.0.1:8089"
+
+	// emulatorAddrAllInterfaces is used on macOS/Windows where
+	// --network=host is unavailable. The worker container reaches the
+	// host emulator via host.docker.internal, which requires the
+	// emulator to bind on all interfaces rather than loopback only.
+	emulatorAddrAllInterfaces = "0.0.0.0:8089"
 
 	// invocationExecutionID is the synthetic scan_executions UUID the
 	// harness reports. Stable so reproducing failures in fixtures is
@@ -260,15 +267,19 @@ func compactSchemaError(err error) string {
 	return strings.Join(parts, "; ")
 }
 
-// listenEmulator binds the emulator to its production port. The error
-// is wrapped so the caller can detect "address in use" and produce a
-// helpful message (typically: another aa26-connector test still
-// running, or a leftover runtime sidecar from `tilt up`).
+// listenEmulator binds the emulator to its production port. On macOS and
+// Windows, --network=host is unavailable, so the emulator listens on all
+// interfaces (0.0.0.0:8089) and workers connect via host.docker.internal.
+// On Linux the original loopback bind is preserved.
 func listenEmulator() (net.Listener, error) {
-	l, err := net.Listen("tcp", emulatorAddr)
+	addr := emulatorAddr
+	if runtime.GOOS != "linux" {
+		addr = emulatorAddrAllInterfaces
+	}
+	l, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("emulator bind %s: %w (another aa26-connector test running? "+
-			"local runtime sidecar listening?)", emulatorAddr, err)
+			"local runtime sidecar listening?)", addr, err)
 	}
 	return l, nil
 }
