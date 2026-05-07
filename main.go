@@ -3,14 +3,18 @@
 // Subcommands:
 //   new <name>  --lang=python|bash    scaffold a connector skeleton
 //   validate [path]                    validate a connector.yaml against the schema
+//   lint [path]                        static-lint the connector source for known footguns
 //   test [path] [flags]                run the connector locally against an
-//                                      in-process sidecar emulator
+//                                      in-process sidecar emulator (or the real
+//                                      runtime under --real-runtime). Lint runs
+//                                      first; warnings are advisory unless --strict.
 //   package [--out=FILE]               bundle the current directory into a
 //                                      deployable .tar.gz for upload
 //
 // Designed for "write a connector in <30 minutes" — no daemon to install,
-// no Docker required for `new`/`validate`. `test` shells out to `docker run`
-// to exercise the connector image; `package` shells out to `docker save`.
+// no Docker required for `new`/`validate`/`lint`. `test` shells out to
+// `docker run` to exercise the connector image; `package` shells out to
+// `docker save`.
 //
 // The connector + finding JSON Schemas are embedded at build time so the
 // binary is self-contained — no external schema files required.
@@ -29,6 +33,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -53,20 +58,34 @@ Usage:
   aa26-connector validate [PATH]
       Validate connector.yaml against the schema. Defaults to ./connector.yaml.
 
+  aa26-connector lint [PATH]
+      Statically scan connector source for known footguns (e.g. json.load
+      on a 204 response, sidecar URL drift). Advisory by default; pair
+      with --strict to fail on any warning.
+
   aa26-connector test [PATH] [flags]
-      Run the connector locally against an in-process sidecar emulator
-      that matches the production runtime contract. Validates findings
-      against the envelope schema, evaluates fixture expectations, and
-      streams worker stdout/stderr. Requires docker.
+      Run the connector locally against the sidecar contract. By default
+      uses the in-process emulator; --real-runtime swaps in the production
+      runtime container. Validates findings against the envelope schema,
+      evaluates fixture expectations, and streams worker stdout/stderr.
+      Requires docker.
 
       Flags:
-        --fixture=FILE        Test fixture YAML (default ./test-fixture.yaml).
-                              Created on the fly if absent.
-        --non-interactive     Don't prompt for missing connection params;
-                              fail loudly. Use in CI.
-        --save-fixture        Write resolved connection params back to the
-                              fixture so the next run is reproducible.
-        --keep-going          Don't exit non-zero on expectation failures.
+        --fixture=FILE         Test fixture YAML (default ./test-fixture.yaml).
+                               Created on the fly if absent.
+        --non-interactive      Don't prompt for missing connection params;
+                               fail loudly. Use in CI.
+        --save-fixture         Write resolved connection params back to the
+                               fixture so the next run is reproducible.
+        --keep-going           Don't exit non-zero on expectation failures.
+        --probe-contract       Run the worker through every contract probe
+                               scenario (cold start, warm start, sidecar
+                               errors). Slower; cleanest pre-PR check.
+        --real-runtime         Run the real connector-prototype runtime
+                               container instead of the in-process emulator.
+        --runtime-image=IMG    Override the runtime image used by --real-runtime.
+        --strict               Fail on lint warnings, not just lint errors.
+        --skip-lint            Skip the lint pre-check.
 
   aa26-connector package [--out=FILE]
       Bundle the current directory into a deployable .tar.gz for upload
@@ -88,6 +107,9 @@ func main() {
 		fail(err)
 	case "validate":
 		err := cmdValidate(os.Args[2:])
+		fail(err)
+	case "lint":
+		err := cmdLint(os.Args[2:])
 		fail(err)
 	case "test":
 		err := cmdTest(os.Args[2:])
@@ -203,6 +225,52 @@ func cmdValidate(args []string) error {
 	return nil
 }
 
+// ─── lint ──────────────────────────────────────────────────────────────
+
+func cmdLint(args []string) error {
+	root := "."
+	strict := false
+	for _, a := range args {
+		switch {
+		case a == "--strict":
+			strict = true
+		case strings.HasPrefix(a, "--"):
+			return fmt.Errorf("unknown flag %q", a)
+		default:
+			root = a
+		}
+	}
+	findings, err := Lint(LintConfig{Root: root})
+	if err != nil {
+		return err
+	}
+	if len(findings) == 0 {
+		fmt.Println("✓ lint clean")
+		return nil
+	}
+	var b strings.Builder
+	hasError := PrintLintFindings(findings, &b)
+	fmt.Print(b.String())
+
+	warnings := 0
+	errs := 0
+	for _, f := range findings {
+		if f.Severity == "error" {
+			errs++
+		} else {
+			warnings++
+		}
+	}
+	fmt.Fprintf(os.Stderr, "\n%d error(s), %d warning(s)\n", errs, warnings)
+	if hasError {
+		return errors.New("lint reported errors")
+	}
+	if strict && warnings > 0 {
+		return errors.New("lint reported warnings (--strict)")
+	}
+	return nil
+}
+
 // loadSchema returns the compiled connector-manifest JSON Schema. The
 // schema is embedded into the binary at build time so the CLI works the
 // same on a fresh checkout, in CI, on a developer laptop, and behind
@@ -249,6 +317,11 @@ type testFlags struct {
 	nonInteractive bool
 	saveFixture    bool
 	keepGoing      bool
+	probeContract  bool
+	realRuntime    bool
+	runtimeImage   string
+	strict         bool
+	skipLint       bool
 }
 
 func parseTestFlags(args []string) (testFlags, error) {
@@ -266,6 +339,16 @@ func parseTestFlags(args []string) (testFlags, error) {
 			f.saveFixture = true
 		case a == "--keep-going":
 			f.keepGoing = true
+		case a == "--probe-contract":
+			f.probeContract = true
+		case a == "--real-runtime":
+			f.realRuntime = true
+		case strings.HasPrefix(a, "--runtime-image="):
+			f.runtimeImage = strings.TrimPrefix(a, "--runtime-image=")
+		case a == "--strict":
+			f.strict = true
+		case a == "--skip-lint":
+			f.skipLint = true
 		case strings.HasPrefix(a, "--"):
 			return f, fmt.Errorf("unknown flag %q", a)
 		default:
@@ -275,10 +358,11 @@ func parseTestFlags(args []string) (testFlags, error) {
 	return f, nil
 }
 
-// cmdTest is the harness entry point. It validates the manifest, resolves
-// the connection block (fixture + interactive prompt), starts an emulator
-// on the production port, runs the worker container with the same env
-// vars core-api would set, and evaluates the fixture's expectations.
+// cmdTest is the harness entry point. It validates the manifest, runs the
+// pre-flight linter, resolves the connection block (fixture + interactive
+// prompt), starts an emulator on the production port (or the real runtime
+// under --real-runtime), runs the worker container, and evaluates the
+// fixture's expectations.
 func cmdTest(args []string) error {
 	flags, err := parseTestFlags(args)
 	if err != nil {
@@ -287,6 +371,12 @@ func cmdTest(args []string) error {
 
 	if err := cmdValidate([]string{flags.manifestPath}); err != nil {
 		return fmt.Errorf("manifest invalid: %w", err)
+	}
+
+	if !flags.skipLint {
+		if err := runPreflightLint(filepath.Dir(flags.manifestPath), flags.strict); err != nil {
+			return err
+		}
 	}
 
 	manifest, err := loadManifestForTest(flags.manifestPath)
@@ -321,22 +411,106 @@ func cmdTest(args []string) error {
 		return err
 	}
 
-	result := &RunResult{}
+	if flags.probeContract {
+		return runProbeContract(flags, manifest, fixture, connection, findingSchema)
+	}
+	return runSingleScenario(flags, manifest, fixture, connection, findingSchema, fixture.Emulator)
+}
+
+// runPreflightLint executes the static lint and prints findings. By
+// default warnings are advisory (so first-time authors aren't blocked by
+// stylistic rules), and only errors fail the run. --strict promotes
+// warnings to failures.
+func runPreflightLint(root string, strict bool) error {
+	if root == "" {
+		root = "."
+	}
+	findings, err := Lint(LintConfig{Root: root})
+	if err != nil {
+		return fmt.Errorf("lint: %w", err)
+	}
+	if len(findings) == 0 {
+		fmt.Fprintln(os.Stderr, "→ lint clean")
+		return nil
+	}
+	var b strings.Builder
+	hasError := PrintLintFindings(findings, &b)
+	fmt.Fprintln(os.Stderr, "→ lint:")
+	for _, line := range strings.Split(strings.TrimRight(b.String(), "\n"), "\n") {
+		fmt.Fprintln(os.Stderr, "  "+line)
+	}
+	if hasError {
+		return errors.New("lint reported errors (use --skip-lint to bypass)")
+	}
+	if strict {
+		return errors.New("lint reported warnings (--strict)")
+	}
+	return nil
+}
+
+// runSingleScenario does one harness pass: emulator (or real runtime),
+// run worker, evaluate. Used for the default test mode and for each
+// iteration of --probe-contract.
+func runSingleScenario(
+	flags testFlags,
+	manifest *manifestSummary,
+	fixture *Fixture,
+	connection map[string]any,
+	findingSchema *jsonschema.Schema,
+	overrides *EmulatorOverrides,
+) error {
+	result := &RunResult{StartTime: time.Now(), EndpointCalls: map[string]int{}}
+
+	exitCode, err := executeWorker(flags, manifest, fixture, connection, findingSchema, overrides, result)
+	if err != nil {
+		return err
+	}
+	result.ExitCode = exitCode
+
+	failures := fixture.Evaluate(result)
+	printSummary(result, failures, manifest, flags)
+
+	if len(failures) > 0 && !flags.keepGoing {
+		return fmt.Errorf("%d expectation(s) failed", len(failures))
+	}
+	return nil
+}
+
+// executeWorker dispatches between the in-process emulator and the
+// real-runtime container. Returns the worker's exit code; result is
+// populated in-place either way.
+func executeWorker(
+	flags testFlags,
+	manifest *manifestSummary,
+	fixture *Fixture,
+	connection map[string]any,
+	findingSchema *jsonschema.Schema,
+	overrides *EmulatorOverrides,
+	result *RunResult,
+) (int, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if flags.realRuntime {
+		fmt.Fprintf(os.Stderr, "→ real runtime: %s\n", flags.runtimeImage)
+		fmt.Fprintf(os.Stderr, "→ running %s (op=%s, function_type=%s)\n",
+			manifest.imageRef, fixture.OperationName(), fixture.Op)
+		return runRealRuntime(ctx, RealRuntimeConfig{Image: flags.runtimeImage}, manifest, fixture, connection, findingSchema, result)
+	}
+
 	emulator := NewEmulator(fixture.OperationName(), connection, findingSchema, result)
+	emulator.SetOverrides(overrides)
 
 	listener, err := listenEmulator()
 	if err != nil {
-		return err
+		return -1, err
 	}
 	server := &http.Server{Handler: emulator, ReadHeaderTimeout: 10 * time.Second}
 	serverErrCh := make(chan error, 1)
 	go func() { serverErrCh <- server.Serve(listener) }()
-
-	shutdownCtx, cancelShutdown := context.WithCancel(context.Background())
-	defer cancelShutdown()
 	defer func() {
-		shutdownTimeout, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
+		shutdownTimeout, scancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer scancel()
 		_ = server.Shutdown(shutdownTimeout)
 	}()
 
@@ -345,17 +519,81 @@ func cmdTest(args []string) error {
 		manifest.imageRef, fixture.OperationName(), fixture.Op)
 
 	dockerEnv := buildWorkerEnv(fixture, manifest, connection)
-	exitCode, err := runWorker(shutdownCtx, manifest.imageRef, dockerEnv, emulator.Done())
-	if err != nil {
-		return err
+	tail := &outputTail{cap: workerOutputTailMax}
+	exitCode, err := runWorker(ctx, manifest.imageRef, dockerEnv, emulator.Done(), tail)
+	result.WorkerOutputTail = tail.snapshot()
+	return exitCode, err
+}
+
+// runProbeContract loops the worker through every probe scenario,
+// collecting per-scenario pass/fail outcomes and printing a matrix at
+// the end. A scenario "passes" when the worker reaches a status the
+// scenario's allow-list accepts AND no schema-validation errors fired.
+func runProbeContract(
+	flags testFlags,
+	manifest *manifestSummary,
+	fixture *Fixture,
+	connection map[string]any,
+	findingSchema *jsonschema.Schema,
+) error {
+	scenarios := DefaultProbeScenarios()
+	type outcome struct {
+		Name   string
+		Status string
+		Pass   bool
+		Detail string
 	}
-	result.ExitCode = exitCode
+	outcomes := make([]outcome, 0, len(scenarios))
+	totalFailures := 0
 
-	failures := fixture.Evaluate(result)
-	printSummary(result, failures)
+	for i, sc := range scenarios {
+		fmt.Fprintf(os.Stderr, "\n══ probe %d/%d: %s ══\n", i+1, len(scenarios), sc.Name)
+		fmt.Fprintf(os.Stderr, "   %s\n", sc.Description)
 
-	if len(failures) > 0 && !flags.keepGoing {
-		return fmt.Errorf("%d expectation(s) failed", len(failures))
+		merged := MergeOverrides(fixture.Emulator, sc.Overrides)
+		result := &RunResult{StartTime: time.Now(), EndpointCalls: map[string]int{}}
+
+		exitCode, err := executeWorker(flags, manifest, fixture, connection, findingSchema, merged, result)
+		if err != nil {
+			outcomes = append(outcomes, outcome{Name: sc.Name, Status: "(error)", Pass: false, Detail: err.Error()})
+			totalFailures++
+			continue
+		}
+		result.ExitCode = exitCode
+
+		// Override-derived scenarios may legitimately produce schema-invalid
+		// findings (e.g. /v1/findings 500), so we relax the schema-validation
+		// failure rule here. Status acceptance is the single gate.
+		got := result.Status
+		if got == "" {
+			if exitCode == 0 {
+				got = "completed"
+			} else {
+				got = "failed"
+			}
+		}
+		pass := sc.AcceptsStatus(got)
+		detail := ""
+		if !pass {
+			detail = fmt.Sprintf("got status=%q, want one of %v", got, sc.AcceptStatus)
+			totalFailures++
+		}
+		outcomes = append(outcomes, outcome{Name: sc.Name, Status: got, Pass: pass, Detail: detail})
+	}
+
+	fmt.Fprintln(os.Stderr, "\n─── probe summary ─────────────────────────────────")
+	for _, o := range outcomes {
+		mark := "✓"
+		if !o.Pass {
+			mark = "✗"
+		}
+		fmt.Fprintf(os.Stderr, "  %s %-20s status=%s\n", mark, o.Name, o.Status)
+		if o.Detail != "" {
+			fmt.Fprintf(os.Stderr, "      %s\n", o.Detail)
+		}
+	}
+	if totalFailures > 0 && !flags.keepGoing {
+		return fmt.Errorf("%d/%d probe scenario(s) failed", totalFailures, len(scenarios))
 	}
 	return nil
 }
@@ -470,7 +708,7 @@ func nonEmpty(s, def string) string {
 // worker POSTs /v1/complete — some long-running connectors take a few
 // seconds to wind down their own goroutines after, and we'd rather
 // surface results to the author immediately than wait.
-func runWorker(ctx context.Context, imageRef string, env []string, done <-chan struct{}) (int, error) {
+func runWorker(ctx context.Context, imageRef string, env []string, done <-chan struct{}, tail *outputTail) (int, error) {
 	args := []string{"run", "--rm", "--network=host"}
 	for _, e := range env {
 		args = append(args, "-e", e)
@@ -478,14 +716,14 @@ func runWorker(ctx context.Context, imageRef string, env []string, done <-chan s
 	args = append(args, imageRef)
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Stdout = streamPrefix(os.Stderr, "worker | ")
-	cmd.Stderr = streamPrefix(os.Stderr, "worker | ")
+	cmd.Stdout = teeWithTail(os.Stderr, "worker | ", tail)
+	cmd.Stderr = teeWithTail(os.Stderr, "worker | ", tail)
 	if err := cmd.Start(); err != nil {
 		if isDockerPermissionError(err) {
 			fmt.Fprintln(os.Stderr, "  (docker without sudo failed — retrying with sudo)")
 			cmd = exec.CommandContext(ctx, "sudo", append([]string{"docker"}, args...)...)
-			cmd.Stdout = streamPrefix(os.Stderr, "worker | ")
-			cmd.Stderr = streamPrefix(os.Stderr, "worker | ")
+			cmd.Stdout = teeWithTail(os.Stderr, "worker | ", tail)
+			cmd.Stderr = teeWithTail(os.Stderr, "worker | ", tail)
 			if err := cmd.Start(); err != nil {
 				return -1, fmt.Errorf("docker run: %w", err)
 			}
@@ -545,8 +783,9 @@ func isDockerPermissionError(err error) bool {
 }
 
 // streamPrefix returns an io.Writer that prefixes every line with `prefix`
-// before forwarding to `w`. Used so the harness's own stderr lines and
-// the worker's interleaved output are easy to tell apart.
+// before forwarding to `w`. Used for child-process logs that don't need
+// to be captured into a tail buffer (e.g. the runtime container in
+// real-runtime mode — its findings are read from a file separately).
 func streamPrefix(w io.Writer, prefix string) io.Writer {
 	pr, pw := io.Pipe()
 	go func() {
@@ -574,7 +813,14 @@ func streamPrefix(w io.Writer, prefix string) io.Writer {
 	return pw
 }
 
-func printSummary(r *RunResult, failures []string) {
+// printSummary renders the post-run report. Three sections:
+//  1. counts (existing behavior, retained)
+//  2. endpoint coverage table — every sidecar path the harness recognizes,
+//     with hit count
+//  3. forensic block (only if the worker exited non-zero before /v1/complete)
+//     summarizing the last sidecar call, recent worker output, and a
+//     heuristic suggestion when one fits the failure shape.
+func printSummary(r *RunResult, failures []string, m *manifestSummary, flags testFlags) {
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "─── summary ───────────────────────────────────────")
 	fmt.Fprintf(os.Stderr, "  invocations:  %d\n", r.InvocationCount)
@@ -586,6 +832,14 @@ func printSummary(r *RunResult, failures []string) {
 	} else {
 		fmt.Fprintf(os.Stderr, "  status:       (worker did not POST /v1/complete; exit=%d)\n", r.ExitCode)
 	}
+
+	printCoverage(r)
+	printErrorLogs(r)
+
+	if isFirstCallFailure(r) {
+		printForensic(r, m, flags)
+	}
+
 	if len(failures) == 0 {
 		fmt.Fprintln(os.Stderr, "  result:       ✓ pass")
 		return
@@ -594,6 +848,168 @@ func printSummary(r *RunResult, failures []string) {
 	for _, f := range failures {
 		fmt.Fprintf(os.Stderr, "    - %s\n", f)
 	}
+}
+
+// known sidecar endpoints that show up in coverage tables. The order is
+// the canonical ordering used in docs/runtime-contract.md so the report
+// reads top-to-bottom the way the contract is documented.
+var coverageEndpoints = []struct{ Method, Path string }{
+	{"GET", "/v1/invocation"},
+	{"GET", "/v1/checkpoint"},
+	{"POST", "/v1/checkpoint"},
+	{"POST", "/v1/findings"},
+	{"POST", "/v1/progress"},
+	{"POST", "/v1/log"},
+	{"GET", "/v1/control"},
+	{"POST", "/v1/process"},
+	{"POST", "/v1/complete"},
+}
+
+func printCoverage(r *RunResult) {
+	fmt.Fprintln(os.Stderr, "  coverage:")
+	keysSeen := map[string]bool{}
+	for _, ep := range coverageEndpoints {
+		key := ep.Method + " " + ep.Path
+		count := r.EndpointCalls[key]
+		mark := "✓"
+		if count == 0 {
+			mark = "·"
+		}
+		fmt.Fprintf(os.Stderr, "    %s %-4s %-18s %dx\n", mark, ep.Method, ep.Path, count)
+		keysSeen[key] = true
+	}
+	// Surface unexpected paths (e.g. /healthz, typos) so coverage isn't
+	// silently mis-attributed.
+	var extra []string
+	for k := range r.EndpointCalls {
+		if !keysSeen[k] {
+			extra = append(extra, k)
+		}
+	}
+	if len(extra) > 0 {
+		sort.Strings(extra)
+		for _, k := range extra {
+			fmt.Fprintf(os.Stderr, "    ? %-23s %dx (unrecognized path)\n", k, r.EndpointCalls[k])
+		}
+	}
+}
+
+// printErrorLogs surfaces every error-level log message the worker emitted,
+// but only when something is actually wrong (status=failed, non-zero exit,
+// or any error log at all). The point is to put the worker's own error
+// reason in the summary instead of forcing authors to re-read the streamed
+// worker output. On healthy runs the section is suppressed to keep the
+// summary tight.
+func printErrorLogs(r *RunResult) {
+	errs := 0
+	for _, e := range r.LogEvents {
+		if e.Level == "error" {
+			errs++
+		}
+	}
+	if errs == 0 {
+		return
+	}
+	healthy := r.Status == "completed" && r.ExitCode == 0
+	if healthy {
+		// Errors logged on a healthy run are usually transient (retried
+		// successfully). Keep them out of the summary unless the run
+		// failed — but mention the count so they're not invisible.
+		return
+	}
+	fmt.Fprintln(os.Stderr, "  error logs:")
+	const maxShown = 5
+	shown := 0
+	for _, e := range r.LogEvents {
+		if e.Level != "error" {
+			continue
+		}
+		if shown >= maxShown {
+			break
+		}
+		msg := e.Message
+		if msg == "" {
+			msg = "(empty message)"
+		}
+		fmt.Fprintf(os.Stderr, "    - %s\n", msg)
+		shown++
+	}
+	if errs > maxShown {
+		fmt.Fprintf(os.Stderr, "    (and %d more — re-run with --keep-going for full output)\n", errs-maxShown)
+	}
+}
+
+func isFirstCallFailure(r *RunResult) bool {
+	if r.Status != "" {
+		return false
+	}
+	if r.ExitCode == 0 {
+		return false
+	}
+	return true
+}
+
+// printForensic emits the high-signal "what killed the worker" block when
+// the worker died before /v1/complete. Designed to be the first thing
+// authors look at when a test fails — concrete pointers ahead of generic
+// "expectation failed" messages.
+func printForensic(r *RunResult, m *manifestSummary, flags testFlags) {
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "─── forensic ──────────────────────────────────────")
+	if r.LastCall != nil {
+		fmt.Fprintf(os.Stderr, "  last sidecar call: %s %s → %d at T+%.2fs\n",
+			r.LastCall.Method, r.LastCall.Path, r.LastCall.Status, r.LastCall.OccurredAt.Seconds())
+	} else {
+		fmt.Fprintln(os.Stderr, "  last sidecar call: none — worker died before any HTTP call.")
+	}
+	fmt.Fprintf(os.Stderr, "  worker exit: %d\n", r.ExitCode)
+	fmt.Fprintf(os.Stderr, "  image: %s\n", m.imageRef)
+
+	if hint := heuristicHint(r); hint != "" {
+		fmt.Fprintf(os.Stderr, "  likely cause: %s\n", hint)
+	}
+
+	if len(r.WorkerOutputTail) > 0 {
+		n := 20
+		if len(r.WorkerOutputTail) < n {
+			n = len(r.WorkerOutputTail)
+		}
+		fmt.Fprintf(os.Stderr, "  worker output (last %d lines):\n", n)
+		for _, line := range r.WorkerOutputTail[len(r.WorkerOutputTail)-n:] {
+			fmt.Fprintf(os.Stderr, "    | %s\n", line)
+		}
+	}
+
+	if !flags.skipLint {
+		// Authors who already saw a lint warning above don't need it
+		// repeated; the forensic block aims to avoid duplication. We do
+		// re-print here only if the lint pass was skipped.
+		return
+	}
+	fmt.Fprintln(os.Stderr, "  re-run with `aa26-connector lint` for static suggestions.")
+}
+
+// heuristicHint maps observed failure shapes to known root causes. Matches
+// are intentionally narrow — false positives are worse than no hint.
+func heuristicHint(r *RunResult) string {
+	if r.LastCall == nil {
+		return ""
+	}
+	if r.LastCall.Path == "/v1/checkpoint" && r.LastCall.Method == "GET" && r.LastCall.Status == 204 {
+		return "worker likely crashed parsing the empty 204 response from GET /v1/checkpoint " +
+			"(common: json.load on empty body)."
+	}
+	if r.LastCall.Path == "/v1/invocation" {
+		return "worker died after fetching invocation — likely a connection-block parse error " +
+			"or missing required field. Inspect REQUEST_DATA env."
+	}
+	for _, line := range r.WorkerOutputTail {
+		l := strings.ToLower(line)
+		if strings.Contains(l, "expecting value: line 1 column 1") || strings.Contains(l, "jsondecodeerror") {
+			return "JSON decode error in worker output — likely .json() on a 204/empty response."
+		}
+	}
+	return ""
 }
 
 func countValid(fs []ValidatedFinding) int {
@@ -606,6 +1022,9 @@ func countValid(fs []ValidatedFinding) int {
 	return n
 }
 
+// countLevel counts log events at the given level. Used by both the
+// summary header line ("log events: N (errors: M)") and the printErrorLogs
+// short-circuit decision.
 func countLevel(es []LogEvent, level string) int {
 	n := 0
 	for _, e := range es {

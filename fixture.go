@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"sigs.k8s.io/yaml"
 )
@@ -48,9 +49,41 @@ type Fixture struct {
 	// doesn't model directly (e.g. DEBUG, custom timeouts).
 	Env map[string]string `json:"env,omitempty"`
 
+	// Emulator lets a fixture override how the in-process emulator
+	// responds on selected endpoints. Used to write deliberate negative
+	// tests (e.g. "respond to /v1/checkpoint with 200 and a payload" to
+	// exercise the warm-start path) without modifying connector code.
+	Emulator *EmulatorOverrides `json:"emulator,omitempty"`
+
 	// Expect describes what the harness checks after the worker exits.
 	// An empty Expect block is equivalent to "any successful run passes".
 	Expect ExpectBlock `json:"expect,omitempty"`
+}
+
+// EmulatorOverrides are per-endpoint response overrides. The keys of
+// Responses are paths exactly as the connector would request them (e.g.
+// "/v1/checkpoint"). Each ResponseOverride replaces the emulator's default
+// reply for that path. The override applies to all methods unless Method
+// is set.
+type EmulatorOverrides struct {
+	Responses map[string]ResponseOverride `json:"responses,omitempty"`
+}
+
+// ResponseOverride tells the emulator to return a custom status/body for
+// one endpoint. Status defaults to 200 when unset; Body defaults to "".
+// Headers are merged on top of the emulator's defaults — Content-Type
+// can be overridden here.
+type ResponseOverride struct {
+	// Method, when set, restricts the override to a single HTTP method
+	// (e.g. "GET"). When empty the override matches every method.
+	Method string `json:"method,omitempty"`
+	// Status is the HTTP status the emulator returns. 0 → 200.
+	Status int `json:"status,omitempty"`
+	// Body is the raw response body. Use "" to send an empty body (handy
+	// for testing 204 / empty-body handling).
+	Body string `json:"body,omitempty"`
+	// Headers are response headers added on top of the emulator's defaults.
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 // ExpectBlock is the post-run assertion set.
@@ -67,6 +100,12 @@ type ExpectBlock struct {
 	// NoErrorLogs, when true, fails the run if any /v1/log POST carried
 	// kind=log with level=error.
 	NoErrorLogs bool `json:"noErrorLogs,omitempty"`
+
+	// RequiredEndpoints, when non-empty, fails the run if the worker did
+	// not call every listed sidecar endpoint at least once. Useful for
+	// connectors with optional code paths the author wants to keep covered
+	// in CI (e.g. ensure /v1/checkpoint was exercised).
+	RequiredEndpoints []string `json:"requiredEndpoints,omitempty"`
 }
 
 // FindingExpect bounds and types the findings stream.
@@ -162,10 +201,43 @@ type RunResult struct {
 	// Level set to "(unparseable)" so noErrorLogs can flag them.
 	LogEvents []LogEvent
 
-	// ProgressCount and InvocationCount are counters for the summary line.
+	// ProgressCount and InvocationCount are counters retained for legacy
+	// reporting. New code should prefer EndpointCalls below, which is the
+	// authoritative per-endpoint counter.
 	ProgressCount   int
 	InvocationCount int
+
+	// StartTime is when the harness began the worker run. Used to compute
+	// EndpointCall.OccurredAt as a relative duration so failure summaries
+	// say "T+0.31s" rather than absolute timestamps.
+	StartTime time.Time
+
+	// EndpointCalls counts every sidecar endpoint the worker hit, keyed
+	// by "<METHOD> <PATH>". Used by the coverage report and by
+	// expect.requiredEndpoints.
+	EndpointCalls map[string]int
+
+	// LastCall records the most recent sidecar interaction. The forensic
+	// summary on first-call failure quotes this so authors can pinpoint
+	// which call killed the worker.
+	LastCall *EndpointCall
+
+	// WorkerOutputTail is a ring buffer of the last N lines of worker
+	// stdout/stderr, kept so the forensic summary can quote terminal
+	// output without needing a separate log file.
+	WorkerOutputTail []string
 }
+
+// EndpointCall describes a single sidecar interaction.
+type EndpointCall struct {
+	Method     string
+	Path       string
+	Status     int           // status the emulator returned
+	OccurredAt time.Duration // since RunResult.StartTime
+}
+
+// HitKey returns the canonical map key used for EndpointCalls.
+func (c EndpointCall) HitKey() string { return c.Method + " " + c.Path }
 
 // ValidatedFinding is one /v1/findings NDJSON line plus the validator's
 // verdict. Raw is preserved so the summary can quote bad lines back to
@@ -249,5 +321,34 @@ func (f *Fixture) Evaluate(r *RunResult) []string {
 		}
 	}
 
+	for _, ep := range f.Expect.RequiredEndpoints {
+		if !endpointHit(r.EndpointCalls, ep) {
+			failures = append(failures, fmt.Sprintf("expect.requiredEndpoints: %q never called", ep))
+		}
+	}
+
 	return failures
+}
+
+// endpointHit reports whether `want` was called at least once. `want` may
+// be a bare path ("/v1/checkpoint", matches any method) or a fully-qualified
+// "METHOD /v1/path" (matches that method only).
+func endpointHit(hits map[string]int, want string) bool {
+	if hits == nil {
+		return false
+	}
+	if strings.Contains(want, " ") {
+		return hits[want] > 0
+	}
+	for k, v := range hits {
+		if v == 0 {
+			continue
+		}
+		// k is "METHOD /path"
+		idx := strings.IndexByte(k, ' ')
+		if idx > 0 && k[idx+1:] == want {
+			return true
+		}
+	}
+	return false
 }

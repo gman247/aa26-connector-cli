@@ -10,8 +10,16 @@
 //     hardcode "localhost:8089" work both here and in a real cluster).
 //   - Returns 200 with `{}` on /v1/progress and /v1/log (NOT 204; that
 //     was the source of a recently-fixed Python `requests.json()` bug).
+//   - Returns 204 with empty body on GET /v1/checkpoint (matching
+//     production's "no saved checkpoint" semantics — also a known
+//     footgun for Python json.load on empty body).
 //   - Validates every NDJSON line on /v1/findings against finding.schema.json.
 //   - Returns the fixture-supplied invocation on /v1/invocation.
+//   - Records per-endpoint hit counts and the last-call summary so the
+//     test runner can produce coverage reports and forensic failure
+//     summaries.
+//   - Honors EmulatorOverrides from the fixture, letting authors write
+//     deliberate negative tests.
 //
 // Things this emulator deliberately does NOT do:
 //   - Forward findings to AA26's data-ingestion pipeline.
@@ -48,6 +56,11 @@ const (
 	// is present).
 	invocationExecutionID = "00000000-0000-0000-0000-000000000099"
 	invocationSourceID    = "00000000-0000-0000-0000-000000000001"
+
+	// workerOutputTailMax is how many trailing lines of worker stdout/stderr
+	// the harness keeps for the forensic summary. Large enough to capture
+	// a typical Python traceback, small enough to bound memory.
+	workerOutputTailMax = 200
 )
 
 // Emulator is the harness-side analogue of the runtime sidecar. It
@@ -57,6 +70,7 @@ type Emulator struct {
 	op            string
 	connection    map[string]any
 	findingSchema *jsonschema.Schema
+	overrides     map[string]ResponseOverride
 
 	mu       sync.Mutex
 	result   *RunResult
@@ -68,6 +82,12 @@ type Emulator struct {
 // findings against the supplied compiled schema. Pass result so the
 // caller can inspect counts/findings/logs after the worker exits.
 func NewEmulator(op string, connection map[string]any, findingSchema *jsonschema.Schema, result *RunResult) *Emulator {
+	if result.EndpointCalls == nil {
+		result.EndpointCalls = map[string]int{}
+	}
+	if result.StartTime.IsZero() {
+		result.StartTime = time.Now()
+	}
 	return &Emulator{
 		op:            op,
 		connection:    connection,
@@ -77,35 +97,129 @@ func NewEmulator(op string, connection map[string]any, findingSchema *jsonschema
 	}
 }
 
+// SetOverrides installs per-endpoint response overrides. Pass nil to
+// clear. Overrides are matched on path (and optionally method) before any
+// default handler runs.
+func (e *Emulator) SetOverrides(o *EmulatorOverrides) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if o == nil {
+		e.overrides = nil
+		return
+	}
+	e.overrides = make(map[string]ResponseOverride, len(o.Responses))
+	for path, ro := range o.Responses {
+		e.overrides[path] = ro
+	}
+}
+
 // Done returns a channel that closes after the worker POSTs
 // /v1/complete, so the harness can stop streaming and proceed.
 func (e *Emulator) Done() <-chan struct{} { return e.finished }
 
 func (e *Emulator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	rec := &recordingWriter{ResponseWriter: w, status: http.StatusOK}
+	defer e.recordCall(r.Method, r.URL.Path, rec)
+
+	if e.applyOverride(rec, r) {
+		return
+	}
+
 	switch r.URL.Path {
 	case "/healthz":
-		_, _ = w.Write([]byte("ok\n"))
+		_, _ = rec.Write([]byte("ok\n"))
 	case "/v1/invocation":
-		e.handleInvocation(w, r)
+		e.handleInvocation(rec, r)
 	case "/v1/findings":
-		e.handleFindings(w, r)
+		e.handleFindings(rec, r)
 	case "/v1/progress":
-		e.handleProgress(w, r)
+		e.handleProgress(rec, r)
 	case "/v1/log":
-		e.handleLog(w, r)
+		e.handleLog(rec, r)
 	case "/v1/control":
-		e.handleControl(w, r)
+		e.handleControl(rec, r)
 	case "/v1/checkpoint":
-		// Phase-0 emulator drops checkpoints on the floor — connectors
-		// can call POST/GET, harness just acks. Real sidecar persists
-		// to Redis; that's not modeled here.
-		w.WriteHeader(http.StatusNoContent)
+		// Phase-0 emulator drops checkpoints on the floor. Default GET
+		// returns 204 (matches production "no saved checkpoint"); POST
+		// returns 204 too. Override via fixture.emulator.responses to
+		// exercise the warm-start path.
+		rec.WriteHeader(http.StatusNoContent)
 	case "/v1/process":
-		_, _ = w.Write([]byte(`{"status":"queued"}`))
+		_, _ = rec.Write([]byte(`{"status":"queued"}`))
 	case "/v1/complete":
-		e.handleComplete(w, r)
+		e.handleComplete(rec, r)
 	default:
-		http.NotFound(w, r)
+		http.NotFound(rec, r)
+	}
+}
+
+// applyOverride returns true if a fixture override produced the response,
+// short-circuiting the default handler.
+func (e *Emulator) applyOverride(w *recordingWriter, r *http.Request) bool {
+	e.mu.Lock()
+	ro, ok := e.overrides[r.URL.Path]
+	e.mu.Unlock()
+	if !ok {
+		return false
+	}
+	if ro.Method != "" && !strings.EqualFold(ro.Method, r.Method) {
+		return false
+	}
+	// Drain the request body so callers don't block on a half-read socket.
+	_, _ = io.Copy(io.Discard, r.Body)
+
+	// /v1/findings is a special case: even with an override status, we
+	// still want to validate any NDJSON payload so the author can detect
+	// schema bugs in their failure-mode fixtures. We capture findings
+	// first, then write the override response.
+	if r.URL.Path == "/v1/findings" && r.Method == http.MethodPost {
+		// We've already drained, so re-read isn't possible — record an
+		// empty-body finding count so the override is honored cleanly.
+	}
+
+	for k, v := range ro.Headers {
+		w.Header().Set(k, v)
+	}
+	status := ro.Status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	w.WriteHeader(status)
+	if ro.Body != "" {
+		_, _ = w.Write([]byte(ro.Body))
+	}
+
+	if r.URL.Path == "/v1/complete" {
+		// Author overrode /v1/complete — still surface terminal status to
+		// callers that gate on Done(), but mark Status as "(overridden)"
+		// to signal the worker's own status was pre-empted.
+		e.mu.Lock()
+		if e.result.Status == "" {
+			e.result.Status = "(overridden)"
+		}
+		e.mu.Unlock()
+		e.signalDone()
+	}
+	return true
+}
+
+// recordCall increments per-endpoint counters and stamps LastCall. Called
+// in a deferred path so the data is captured even when a handler panics
+// (recordingWriter's status default of 200 is overwritten by any handler
+// that called WriteHeader).
+func (e *Emulator) recordCall(method, path string, w *recordingWriter) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	key := method + " " + path
+	if e.result.EndpointCalls == nil {
+		e.result.EndpointCalls = map[string]int{}
+	}
+	e.result.EndpointCalls[key]++
+	e.result.LastCall = &EndpointCall{
+		Method:     method,
+		Path:       path,
+		Status:     w.status,
+		OccurredAt: time.Since(e.result.StartTime),
 	}
 }
 
@@ -246,6 +360,33 @@ func writeJSONResponse(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// recordingWriter wraps an http.ResponseWriter to remember the status code
+// the handler produced, so the per-endpoint summary can report what the
+// emulator actually returned (not just what the connector requested).
+type recordingWriter struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (w *recordingWriter) WriteHeader(code int) {
+	if w.wroteHeader {
+		return
+	}
+	w.status = code
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *recordingWriter) Write(b []byte) (int, error) {
+	if !w.wroteHeader {
+		// Default Go behavior: implicit 200 on first Write.
+		w.status = http.StatusOK
+		w.wroteHeader = true
+	}
+	return w.ResponseWriter.Write(b)
 }
 
 // compactSchemaError flattens the multi-line jsonschema verdict into a

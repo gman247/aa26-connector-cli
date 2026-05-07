@@ -213,6 +213,91 @@ func indexOf(s, sub string) int {
 	return -1
 }
 
+func TestFixture_Evaluate_RequiredEndpoints(t *testing.T) {
+	tests := []struct {
+		name     string
+		required []string
+		hits     map[string]int
+		wantPass bool
+	}{
+		{
+			name:     "all required endpoints hit",
+			required: []string{"/v1/invocation", "/v1/findings"},
+			hits:     map[string]int{"GET /v1/invocation": 1, "POST /v1/findings": 3},
+			wantPass: true,
+		},
+		{
+			name:     "missing required endpoint",
+			required: []string{"/v1/checkpoint"},
+			hits:     map[string]int{"GET /v1/invocation": 1},
+			wantPass: false,
+		},
+		{
+			name:     "method-qualified hit",
+			required: []string{"GET /v1/checkpoint"},
+			hits:     map[string]int{"GET /v1/checkpoint": 1},
+			wantPass: true,
+		},
+		{
+			name:     "method-qualified miss (wrong method)",
+			required: []string{"GET /v1/checkpoint"},
+			hits:     map[string]int{"POST /v1/checkpoint": 1},
+			wantPass: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := Fixture{Expect: ExpectBlock{Status: "completed", RequiredEndpoints: tc.required}}
+			r := RunResult{Status: "completed", EndpointCalls: tc.hits}
+			fail := f.Evaluate(&r)
+			if tc.wantPass && len(fail) != 0 {
+				t.Errorf("want pass, got %v", fail)
+			}
+			if !tc.wantPass && len(fail) == 0 {
+				t.Errorf("want fail, got pass")
+			}
+		})
+	}
+}
+
+func TestLoadFixture_ParsesEmulatorOverrides(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fix.yaml")
+	if err := os.WriteFile(path, []byte(`
+op: access-scan
+emulator:
+  responses:
+    /v1/checkpoint:
+      method: GET
+      status: 200
+      body: '{"cursor":"x"}'
+      headers:
+        Content-Type: application/json
+expect:
+  requiredEndpoints:
+    - /v1/checkpoint
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := LoadFixture(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Emulator == nil || f.Emulator.Responses == nil {
+		t.Fatal("emulator overrides not parsed")
+	}
+	cp, ok := f.Emulator.Responses["/v1/checkpoint"]
+	if !ok {
+		t.Fatal("checkpoint override missing")
+	}
+	if cp.Status != 200 || cp.Method != "GET" || cp.Body == "" {
+		t.Errorf("override = %+v", cp)
+	}
+	if len(f.Expect.RequiredEndpoints) != 1 || f.Expect.RequiredEndpoints[0] != "/v1/checkpoint" {
+		t.Errorf("requiredEndpoints = %v", f.Expect.RequiredEndpoints)
+	}
+}
+
 func TestSaveFixture_Roundtrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "fix.yaml")
