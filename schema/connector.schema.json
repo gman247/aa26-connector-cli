@@ -245,11 +245,85 @@
             }
           },
           "additionalProperties": false
+        },
+        "sourceTypes": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Source types this connector emits. Each becomes a source_type_registry row at upload time and defines an ingestion mapping the runtime applies to matching findings.",
+          "items": {
+            "type": "object",
+            "required": ["name", "domain", "ingestion"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[A-Z][A-Za-z0-9]{1,62}$",
+                "description": "PascalCase. Becomes source_type_registry.sourceTypeName. Must be globally unique across all connectors."
+              },
+              "displayName": {
+                "type": "string",
+                "maxLength": 64
+              },
+              "domain": {
+                "type": "string",
+                "enum": ["Artifact", "Computer", "Group", "Principal", "Role", "SystemObject"],
+                "description": "Maps to domain_type_properties.domainName."
+              },
+              "ingestion": {
+                "type": "object",
+                "required": ["target", "mapping"],
+                "additionalProperties": false,
+                "properties": {
+                  "target": {
+                    "type": "string",
+                    "enum": ["entities"],
+                    "description": "v1 supports only the entities table."
+                  },
+                  "mapping": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "Map from entities columns to dotted-path expressions evaluated against each finding. Only the cross-domain allow-list is permitted.",
+                    "properties": {
+                      "name":                 { "$ref": "#/$defs/jsonPathExpr" },
+                      "description":          { "$ref": "#/$defs/jsonPathExpr" },
+                      "displayName":          { "$ref": "#/$defs/jsonPathExpr" },
+                      "pathSegment":          { "$ref": "#/$defs/jsonPathExpr" },
+                      "parentId":             { "$ref": "#/$defs/jsonPathExpr" },
+                      "isContainer":          { "$ref": "#/$defs/jsonPathExpr" },
+                      "hasContent":           { "$ref": "#/$defs/jsonPathExpr" },
+                      "sourceSystemId":       { "$ref": "#/$defs/jsonPathExpr" },
+                      "sourceSystemIdType":   { "$ref": "#/$defs/jsonPathExpr" },
+                      "sizeBytes":            { "$ref": "#/$defs/jsonPathExpr" },
+                      "itemCount":            { "$ref": "#/$defs/jsonPathExpr" },
+                      "descendantCount":      { "$ref": "#/$defs/jsonPathExpr" },
+                      "extension":            { "$ref": "#/$defs/jsonPathExpr" },
+                      "contentType":          { "$ref": "#/$defs/jsonPathExpr" },
+                      "contentHash":          { "$ref": "#/$defs/jsonPathExpr" },
+                      "contentHashAlgorithm": { "$ref": "#/$defs/jsonPathExpr" },
+                      "createdDate":          { "$ref": "#/$defs/jsonPathExpr" },
+                      "modifiedDate":         { "$ref": "#/$defs/jsonPathExpr" },
+                      "lastAccessedDate":     { "$ref": "#/$defs/jsonPathExpr" }
+                    }
+                  },
+                  "additionalProperties": {
+                    "type": "object",
+                    "description": "Map of namespaced extra-keys to path expressions. Each key MUST match '^<metadata.name>\\.[a-zA-Z][a-zA-Z0-9_]*$'.",
+                    "additionalProperties": { "$ref": "#/$defs/jsonPathExpr" }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }
   },
   "$defs": {
+    "jsonPathExpr": {
+      "type": "string",
+      "pattern": "^\\$(\\.[a-zA-Z_][a-zA-Z0-9_]*)+$",
+      "description": "Restricted dotted-path. Root '$' followed by one or more '.<identifier>' segments. Examples: '$.object.url', '$.evidence.raw.etag'."
+    },
     "jsonSchemaSubset": {
       "type": "object",
       "description": "Embedded JSON Schema used to render forms. Validates as a JSON Schema document.",

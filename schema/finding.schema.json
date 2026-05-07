@@ -56,6 +56,11 @@
           "type": "object",
           "description": "Arbitrary string→string labels for filtering/grouping in the UI.",
           "additionalProperties": { "type": "string" }
+        },
+        "sourceType": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Za-z0-9]{1,62}$",
+          "description": "The sourceTypes[].name from the connector manifest that produced this finding. Used by the runtime to route the finding through the correct ingestion mapping. Required for connectors with multiple sourceTypes; optional (with a warning) for single-sourceType connectors."
         }
       },
       "required": ["kind", "type"],

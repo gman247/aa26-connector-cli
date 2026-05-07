@@ -1,0 +1,24 @@
+{
+  "columns": [
+    {"name":"name",                 "type":"Nullable(String)",       "description":"Human-friendly display name."},
+    {"name":"description",          "type":"Nullable(String)",       "description":""},
+    {"name":"displayName",          "type":"Nullable(String)",       "description":""},
+    {"name":"pathSegment",          "type":"String",                 "description":"Path-reconstruction segment. Empty string means the entity contributes no path segment."},
+    {"name":"parentId",             "type":"Nullable(UUID)",         "description":"Set only for hierarchical entities. Must be the entityId (UUIDv5) of an entity emitted earlier in the same scan, or null."},
+    {"name":"isContainer",          "type":"Bool",                   "description":"Connector-asserted."},
+    {"name":"hasContent",           "type":"Bool",                   "description":"Connector-asserted."},
+    {"name":"sourceSystemId",       "type":"Nullable(String)",       "description":"The natural key from the source system (URL, table FQN, conversation ID). Used by the framework to derive entityId. Include for stable IDs across re-scans."},
+    {"name":"sourceSystemIdType",   "type":"Nullable(String)",       "description":"Free-form type label (url, databricks_row_pk, chatgpt_message_id, ...)."},
+    {"name":"sizeBytes",            "type":"Nullable(Int64)",        "description":""},
+    {"name":"itemCount",            "type":"Nullable(Int64)",        "description":"Containers only."},
+    {"name":"descendantCount",      "type":"Nullable(Int64)",        "description":"Containers only."},
+    {"name":"extension",            "type":"Nullable(String)",       "description":""},
+    {"name":"contentType",          "type":"Nullable(String)",       "description":"MIME type."},
+    {"name":"contentHash",          "type":"Nullable(String)",       "description":""},
+    {"name":"contentHashAlgorithm", "type":"Nullable(String)",       "description":"SHA256, MD5, SHA1, ..."},
+    {"name":"createdDate",          "type":"Nullable(DateTime64(6))","description":""},
+    {"name":"modifiedDate",         "type":"Nullable(DateTime64(6))","description":""},
+    {"name":"lastAccessedDate",     "type":"Nullable(DateTime64(6))","description":""},
+    {"name":"additionalProperties", "type":"Map(String, String)",    "description":"Open bag. Each key must be namespaced as <connectorName>.<field>."}
+  ]
+}

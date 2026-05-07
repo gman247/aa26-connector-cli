@@ -21,6 +21,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	_ "embed"
@@ -90,6 +91,17 @@ Usage:
         --sample=N             Print the first N findings as pretty JSON after
                                the summary (default 10; --no-sample to suppress).
 
+  aa26-connector schema entities
+      Print the entities table allow-list (column names, types, descriptions).
+      These are the only columns connector authors may reference in
+      spec.sourceTypes[].ingestion.mapping.
+
+  aa26-connector validate-mapping [--manifest=FILE] FINDINGS_FILE
+      Apply the manifest's sourceTypes ingestion mapping to each finding in
+      FINDINGS_FILE (raw NDJSON, one JSON object per line; use - for stdin)
+      and print the resulting flat entity rows. Useful for iterating on
+      mapping paths without a live cluster.
+
   aa26-connector package [--out=FILE]
       Bundle the current directory into a deployable .tar.gz for upload
       to AA26 (Add New Source). Validates the manifest, runs docker save
@@ -119,6 +131,12 @@ func main() {
 		fail(err)
 	case "package":
 		err := cmdPackage(os.Args[2:])
+		fail(err)
+	case "schema":
+		err := cmdSchema(os.Args[2:])
+		fail(err)
+	case "validate-mapping":
+		err := cmdValidateMapping(os.Args[2:])
 		fail(err)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
@@ -164,7 +182,7 @@ func cmdNew(args []string) error {
 
 	display := humanize(name)
 	files := map[string]string{
-		"connector.yaml": fmt.Sprintf(connectorYAMLTmpl, name, display, "0.1.0", name),
+		"connector.yaml": fmt.Sprintf(connectorYAMLTmpl, name, display, "0.1.0", name, name),
 	}
 	switch lang {
 	case "python":
@@ -225,6 +243,23 @@ func cmdValidate(args []string) error {
 		return fmt.Errorf("invalid:\n%s", err)
 	}
 	fmt.Printf("✓ %s is valid\n", path)
+
+	// Run offline §6 mapping rules.
+	docMap, _ := doc.(map[string]any)
+	connName := ""
+	if meta, _ := docMap["metadata"].(map[string]any); meta != nil {
+		connName, _ = meta["name"].(string)
+	}
+	mappingErrs, mappingWarns := ValidateMappingRules(docMap, connName)
+	for _, w := range mappingWarns {
+		fmt.Fprintf(os.Stderr, "⚠ [M/warn] %s\n", w)
+	}
+	for _, e := range mappingErrs {
+		fmt.Fprintf(os.Stderr, "✗ [M/error] %s\n", e)
+	}
+	if len(mappingErrs) > 0 {
+		return fmt.Errorf("mapping validation failed (%d error(s))", len(mappingErrs))
+	}
 	return nil
 }
 
@@ -614,10 +649,11 @@ func runProbeContract(
 // run time. Re-parsing as a typed struct avoids walking the generic map
 // twice.
 type manifestSummary struct {
-	name       string
-	version    string
-	imageRef   string
-	pullPolicy string
+	name        string
+	version     string
+	imageRef    string
+	pullPolicy  string
+	sourceTypes []ParsedSourceType
 }
 
 func loadManifestForTest(path string) (*manifestSummary, error) {
@@ -649,11 +685,15 @@ func loadManifestForTest(path string) (*manifestSummary, error) {
 	if tag == "" {
 		tag = "dev"
 	}
+	var rawDoc map[string]any
+	_ = json.Unmarshal(jsonBytes, &rawDoc)
+	sourceTypes, _ := ParseSourceTypes(rawDoc)
 	return &manifestSummary{
-		name:       m.Metadata.Name,
-		version:    m.Metadata.Version,
-		imageRef:   m.Spec.Image.Repository + ":" + tag,
-		pullPolicy: m.Spec.Image.PullPolicy,
+		name:        m.Metadata.Name,
+		version:     m.Metadata.Version,
+		imageRef:    m.Spec.Image.Repository + ":" + tag,
+		pullPolicy:  m.Spec.Image.PullPolicy,
+		sourceTypes: sourceTypes,
 	}, nil
 }
 
@@ -858,7 +898,7 @@ func printSummary(r *RunResult, failures []string, m *manifestSummary, flags tes
 
 	printCoverage(r)
 	printErrorLogs(r)
-	printFindingSample(r, flags.sampleCount)
+	printFindingSample(r, flags.sampleCount, m.sourceTypes)
 
 	if isFirstCallFailure(r) {
 		printForensic(r, m, flags)
@@ -893,7 +933,9 @@ var coverageEndpoints = []struct{ Method, Path string }{
 // authors can eyeball the shape of what the connector is emitting without
 // having to add external tooling. Invalid findings are flagged with ✗ and
 // their schema error is printed inline. Pass n=0 to suppress entirely.
-func printFindingSample(r *RunResult, n int) {
+// When sourceTypes are declared in the manifest, it also shows the projected
+// entity row for each finding.
+func printFindingSample(r *RunResult, n int, sourceTypes []ParsedSourceType) {
 	if n <= 0 || len(r.Findings) == 0 {
 		return
 	}
@@ -911,7 +953,6 @@ func printFindingSample(r *RunResult, n int) {
 		if !f.ValidationOK {
 			mark = "✗"
 		}
-		// Pretty-print the raw JSON if it's valid JSON; fall back to raw string.
 		var pretty bytes.Buffer
 		if err := json.Indent(&pretty, []byte(f.Raw), "      ", "  "); err == nil {
 			fmt.Fprintf(os.Stderr, "    %s [%d] %s\n", mark, i+1, pretty.String())
@@ -920,6 +961,26 @@ func printFindingSample(r *RunResult, n int) {
 		}
 		if !f.ValidationOK {
 			fmt.Fprintf(os.Stderr, "        schema error: %s\n", f.ValidationErr)
+		}
+		// Show projected entity row if sourceTypes are declared
+		if len(sourceTypes) > 0 {
+			var findingObj map[string]any
+			if err := json.Unmarshal([]byte(f.Raw), &findingObj); err == nil {
+				row, note := ApplyMapping(sourceTypes, findingObj)
+				if row != nil {
+					var rowPretty bytes.Buffer
+					if rowJSON, err := json.Marshal(row); err == nil {
+						if err := json.Indent(&rowPretty, rowJSON, "        ", "  "); err == nil {
+							fmt.Fprintf(os.Stderr, "      → entities row: %s\n", rowPretty.String())
+						}
+					}
+				} else if note != "" {
+					fmt.Fprintf(os.Stderr, "      → entities row: (skipped: %s)\n", note)
+				}
+				if note != "" && row != nil {
+					fmt.Fprintf(os.Stderr, "      → note: %s\n", note)
+				}
+			}
 		}
 	}
 }
@@ -1105,4 +1166,111 @@ func humanize(name string) string {
 		parts[i] = strings.ToUpper(p[:1]) + p[1:]
 	}
 	return strings.Join(parts, " ")
+}
+
+// ─── schema ────────────────────────────────────────────────────────────
+
+func cmdSchema(args []string) error {
+	if len(args) == 0 || args[0] != "entities" {
+		return fmt.Errorf("usage: aa26-connector schema entities")
+	}
+	fmt.Printf("%-24s  %-28s  %s\n", "COLUMN", "TYPE", "DESCRIPTION")
+	fmt.Printf("%-24s  %-28s  %s\n", strings.Repeat("─", 24), strings.Repeat("─", 28), strings.Repeat("─", 40))
+	for _, c := range entitiesColumns {
+		fmt.Printf("%-24s  %-28s  %s\n", c.Name, c.Type, c.Description)
+	}
+	return nil
+}
+
+// ─── validate-mapping ──────────────────────────────────────────────────
+
+func cmdValidateMapping(args []string) error {
+	manifestPath := "connector.yaml"
+	findingsPath := ""
+	for _, a := range args {
+		switch {
+		case strings.HasPrefix(a, "--manifest="):
+			manifestPath = strings.TrimPrefix(a, "--manifest=")
+		case strings.HasPrefix(a, "--"):
+			return fmt.Errorf("unknown flag %q", a)
+		default:
+			findingsPath = a
+		}
+	}
+
+	// Load and parse manifest
+	raw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return fmt.Errorf("read manifest: %w", err)
+	}
+	jsonBytes, err := yaml.YAMLToJSON(raw)
+	if err != nil {
+		return fmt.Errorf("manifest yaml: %w", err)
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(jsonBytes, &manifest); err != nil {
+		return fmt.Errorf("manifest decode: %w", err)
+	}
+	sourceTypes, err := ParseSourceTypes(manifest)
+	if err != nil {
+		return fmt.Errorf("parse sourceTypes: %w", err)
+	}
+	if len(sourceTypes) == 0 {
+		return fmt.Errorf("manifest has no spec.sourceTypes — nothing to map")
+	}
+
+	// Open findings input
+	var in *os.File
+	if findingsPath == "" || findingsPath == "-" {
+		in = os.Stdin
+	} else {
+		in, err = os.Open(findingsPath)
+		if err != nil {
+			return fmt.Errorf("open findings: %w", err)
+		}
+		defer in.Close()
+	}
+
+	scanner := bufio.NewScanner(in)
+	scanner.Buffer(make([]byte, 1<<20), 8<<20)
+	lineNum := 0
+	projected := 0
+	skipped := 0
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		lineNum++
+		var finding map[string]any
+		if err := json.Unmarshal([]byte(line), &finding); err != nil {
+			fmt.Fprintf(os.Stderr, "line %d: invalid JSON: %s\n", lineNum, err)
+			skipped++
+			continue
+		}
+		row, note := ApplyMapping(sourceTypes, finding)
+		if row == nil {
+			fmt.Fprintf(os.Stderr, "line %d: skipped: %s\n", lineNum, note)
+			skipped++
+			continue
+		}
+		rowJSON, err := json.MarshalIndent(row, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "line %d: marshal error: %s\n", lineNum, err)
+			skipped++
+			continue
+		}
+		fmt.Printf("// line %d", lineNum)
+		if note != "" {
+			fmt.Printf(" (%s)", note)
+		}
+		fmt.Println()
+		fmt.Println(string(rowJSON))
+		projected++
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("read findings: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "\n%d projected, %d skipped\n", projected, skipped)
+	return nil
 }
