@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://connectors.netwrix.io/schema/finding.schema.json",
+  "title": "Connector NDJSON envelope",
+  "description": "One envelope, three event kinds. Connectors POST a stream of these (NDJSON, one JSON object per line) to the runtime sidecar at /v1/findings, /v1/progress, or /v1/log. The sidecar forwards them to AA26's existing data-ingestion pipeline.",
+  "type": "object",
+  "required": ["schemaVersion", "kind", "executionId", "occurredAt"],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Bumped on incompatible envelope changes."
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["finding", "progress", "log"],
+      "description": "finding = a structured record (see 'type'); progress = scan-execution progress tick; log = structured log event."
+    },
+    "executionId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The scan_executions row this event belongs to. Set by the runtime; connectors read it from /v1/invocation."
+    },
+    "sourceId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The Source the execution is running against."
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "oneOf": [
+    {
+      "title": "Finding event",
+      "properties": {
+        "kind":    { "const": "finding" },
+        "type":    { "$ref": "#/$defs/findingType" },
+        "subject": { "$ref": "#/$defs/entityRef" },
+        "object":  { "$ref": "#/$defs/entityRef" },
+        "predicate": {
+          "type": "object",
+          "description": "Relationship between subject and object. Shape depends on finding type. For access_grant: {permission, inherited?, via?}. For sensitive_match: {match, classifier, region?, sample?}. For object_metadata: typically empty.",
+          "additionalProperties": true
+        },
+        "evidence": {
+          "type": "object",
+          "description": "Opaque per-connector raw evidence; framework doesn't interpret. Indexed for free-text search by ingestion.",
+          "properties": {
+            "raw": { "type": "object" }
+          },
+          "additionalProperties": true
+        },
+        "labels": {
+          "type": "object",
+          "description": "Arbitrary string→string labels for filtering/grouping in the UI.",
+          "additionalProperties": { "type": "string" }
+        }
+      },
+      "required": ["kind", "type"],
+      "$comment": "subject/object/predicate are kind-specific; for object_metadata only object is meaningful, for sensitive_match only object+predicate."
+    },
+    {
+      "title": "Progress event",
+      "properties": {
+        "kind":     { "const": "progress" },
+        "processed": { "type": "integer", "minimum": 0 },
+        "total":     { "type": "integer", "minimum": 0, "description": "Optional. Omit if streaming/unknown total." },
+        "message":   { "type": "string" }
+      },
+      "required": ["kind", "processed"]
+    },
+    {
+      "title": "Log event",
+      "properties": {
+        "kind":  { "const": "log" },
+        "level": { "type": "string", "enum": ["debug", "info", "warn", "error"] },
+        "message": { "type": "string" },
+        "attributes": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": ["kind", "level", "message"]
+    }
+  ],
+  "$defs": {
+    "findingType": {
+      "type": "string",
+      "pattern": "^(access_grant|object_metadata|sensitive_match|custom:[a-z][a-z0-9_.-]*)$",
+      "description": "Three built-ins. custom: prefix for connector-specific types — must be declared in manifest.spec.permissions.findingTypes."
+    },
+    "entityRef": {
+      "type": "object",
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "description": "principal | group | file | folder | table | view | bucket | mailbox | message | site | row | <connector-defined>"
+        },
+        "id": {
+          "type": "string",
+          "description": "Stable identifier within the source (e.g. file path, URN, GUID)."
+        },
+        "displayName": { "type": "string" },
+        "path":        { "type": "string" },
+        "size":        { "type": "integer", "minimum": 0 },
+        "url":         { "type": "string", "format": "uri" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

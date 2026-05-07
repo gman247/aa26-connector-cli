@@ -1,6 +1,6 @@
 module github.com/gman247/aa26-connector-cli
 
-go 1.21
+go 1.18
 
 require (
 	github.com/santhosh-tekuri/jsonschema/v5 v5.3.1
