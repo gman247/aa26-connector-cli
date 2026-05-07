@@ -351,15 +351,21 @@ the fixture (see [Fault injection](#emulatorresponses)).
 
 ## Constraints
 
-### Linux-only (v1)
+### Platform behavior
 
-The harness uses `docker run --network=host` to put the worker on the
-same loopback as the emulator. That doesn't work on macOS or Windows
-(host-network is Linux-only).
-
-**Workaround for now:** run the harness on a Linux dev box or VM, or
-use `--real-runtime` (which uses `--network=container:` and works
-cross-platform once you have the runtime image locally).
+- **Linux:** the harness runs the worker with `docker run --network=host`,
+  which puts it on the same loopback as the in-process emulator. The
+  emulator binds `127.0.0.1:8089`. No environment variables required.
+- **macOS / Windows:** `--network=host` is a no-op, so the harness drops
+  it. The emulator binds `0.0.0.0:8089` instead, and the worker is given
+  `SIDECAR_URL=http://host.docker.internal:8089` — the special hostname
+  Docker Desktop resolves to the host. Connectors that hardcode
+  `localhost:8089` should also accept `SIDECAR_URL` as an override (the
+  scaffolded skeleton does).
+- **`--real-runtime` mode** uses `docker run --network=container:<runtime>`
+  to share a network namespace between the runtime and worker containers.
+  This works on every platform Docker supports — both containers see the
+  same loopback regardless of host OS.
 
 ### No `pullPolicy` honoring
 

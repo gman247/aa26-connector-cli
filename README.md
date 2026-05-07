@@ -2,7 +2,7 @@
 
 CLI for authoring **AA26 (Netwrix DSPM) connectors** — the things that let AA26 scan a new kind of data store. Scaffold a connector skeleton, validate the manifest, statically lint the source for known footguns, run the worker locally against an in-process sidecar emulator, and package the bundle for upload.
 
-A single static Go binary with no dependencies. Linux only for `test` (uses `docker run --network=host`).
+A single static Go binary with no dependencies. Cross-platform: `test` runs natively on Linux (via `--network=host`) and on macOS/Windows (via `host.docker.internal`).
 
 ## Quick start
 

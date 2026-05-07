@@ -33,6 +33,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"syscall"
@@ -699,17 +700,28 @@ func nonEmpty(s, def string) string {
 	return s
 }
 
-// runWorker shells out to `docker run --rm --network=host` with the
-// constructed env vars and streams the worker's stdout/stderr to the
-// caller live. Returns the exit code so callers can correlate with the
-// fixture's expected status.
+// runWorker shells out to `docker run --rm` with the constructed env vars
+// and streams the worker's stdout/stderr to the caller live. Returns the
+// exit code so callers can correlate with the fixture's expected status.
+//
+// On Linux, --network=host puts the worker on the same loopback as the
+// in-process emulator. On macOS/Windows (where host-network is unavailable),
+// the emulator binds 0.0.0.0:8089 and the worker connects via
+// host.docker.internal (Docker Desktop's special hostname for the host).
 //
 // The completion signal (emulator.Done) lets us exit promptly when the
 // worker POSTs /v1/complete — some long-running connectors take a few
 // seconds to wind down their own goroutines after, and we'd rather
 // surface results to the author immediately than wait.
 func runWorker(ctx context.Context, imageRef string, env []string, done <-chan struct{}, tail *outputTail) (int, error) {
-	args := []string{"run", "--rm", "--network=host"}
+	var args []string
+	if runtime.GOOS == "linux" {
+		args = []string{"run", "--rm", "--network=host"}
+	} else {
+		// macOS / Windows: host.docker.internal reaches the host from inside a container.
+		args = []string{"run", "--rm"}
+		env = append(env, "SIDECAR_URL=http://host.docker.internal:8089")
+	}
 	for _, e := range env {
 		args = append(args, "-e", e)
 	}
