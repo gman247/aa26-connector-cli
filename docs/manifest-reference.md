@@ -70,6 +70,7 @@ Tells the framework what your connector can do. The UI uses this to decide what 
 capabilities:
   scanTypes: [access_scan, sensitive_data_scan]      # which scans this supports
   operations: [test_connection, discover, scan, fetch, apply]
+  sidecars: [extraction]                             # framework utility sidecars (v1: extraction)
   additionalProcesses:
     - key: enrich_owners
       displayName: Enrich Owners
@@ -87,6 +88,14 @@ capabilities:
 | `apply` | Write back, e.g. apply a sensitivity label | optional |
 
 **Scan types** must be a subset of `[access_scan, sensitive_data_scan, sync]`. If you list `access_scan`, you're promising your `scan` op handles `scanType=access_scan` invocations.
+
+**Sidecars** are framework-managed utility containers attached to your Pod. Opt in to share heavy tooling (Tika, Tesseract, OCR language packs) without bundling it into your image. v1 supports one value:
+
+| sidecar | what it gives you | when to add |
+|---|---|---|
+| `extraction` | Tika + Tesseract behind one HTTP API at `127.0.0.1:8087`. Worker reads `EXTRACTION_URL` from env and POSTs file bytes to `/v1/extract`, gets text back. | Connectors that need to extract text from PDF/DOCX/XLSX/HTML/etc. — typical for SDS scans on file shares, web crawls, S3, SharePoint. |
+
+When you opt into a sidecar, the framework attaches it to every scan Pod, sets the right env var on your worker, and runs its own probes. You write SDK calls; the framework handles tool selection, JVM tuning, OCR language packs, and the failure modes. See [extraction.md](./extraction.md) for the full integration guide.
 
 **Additional processes** are post-processing handlers callable from a running scan via `POST /v1/process`. Skip this section unless you need it.
 

@@ -248,6 +248,13 @@ func cmdTest(args []string) error {
 				Repository string `json:"repository"`
 				Tag        string `json:"tag"`
 			} `json:"image"`
+			Capabilities struct {
+				// Framework-managed sidecars the connector opted into.
+				// v1: ["extraction"]. When present, the harness spins up
+				// a mock for each so the worker's SDK calls succeed
+				// without a real cluster. See docs/extraction.md.
+				Sidecars []string `json:"sidecars"`
+			} `json:"capabilities"`
 		} `json:"spec"`
 	}
 	_ = json.Unmarshal(jsonBytes, &m)
@@ -272,13 +279,44 @@ func cmdTest(args []string) error {
 		return err
 	}
 
+	// 3b. If the manifest declares the extraction sidecar, spin up its mock
+	// on a second port and pass EXTRACTION_URL to the container. The mock
+	// is intentionally thin — synthetic "EXTRACTED:<filename>" text for
+	// any non-image MIME, 415 for image/*. Real Tika/Tesseract behavior
+	// is only available against a cluster pod.
+	var extractionPort int
+	var extractionEmu *extractionEmulator
+	if hasSidecar(m.Spec.Capabilities.Sidecars, "extraction") {
+		extractionPort, err = pickPort()
+		if err != nil {
+			return err
+		}
+		extractionEmu = newExtractionEmulator()
+		extractionServer := &http.Server{
+			Addr:    fmt.Sprintf("127.0.0.1:%d", extractionPort),
+			Handler: extractionEmu,
+		}
+		go func() { _ = extractionServer.ListenAndServe() }()
+		defer extractionServer.Shutdown(context.Background())
+		if err := waitListening(extractionPort, 5*time.Second); err != nil {
+			return err
+		}
+		fmt.Printf("→ extraction emulator listening on 127.0.0.1:%d (mock — Tika+OCR not running)\n", extractionPort)
+	}
+
 	// 4. Run the connector image with SIDECAR_URL pointed at the emulator.
 	// Use --network=host so localhost in the container resolves to the
 	// host's emulator port. Simpler than wiring a docker network.
 	fmt.Printf("→ running %s (op=%s, root=%s)\n", imageRef, op, rootPath)
 	dockerArgs := []string{"run", "--rm", "--network=host",
 		"-e", fmt.Sprintf("SIDECAR_URL=http://127.0.0.1:%d", port),
-		imageRef}
+	}
+	if extractionPort > 0 {
+		dockerArgs = append(dockerArgs,
+			"-e", fmt.Sprintf("EXTRACTION_URL=http://127.0.0.1:%d", extractionPort),
+		)
+	}
+	dockerArgs = append(dockerArgs, imageRef)
 	if err := runDocker(dockerArgs); err != nil {
 		return fmt.Errorf("connector exited: %w", err)
 	}
@@ -289,6 +327,9 @@ func cmdTest(args []string) error {
 	fmt.Printf("  findings:     %d\n", emulator.findingCount())
 	fmt.Printf("  progress:     %d\n", emulator.progressCount())
 	fmt.Printf("  logs:         %d\n", emulator.logCount())
+	if extractionEmu != nil {
+		fmt.Printf("  extractions:  %d\n", extractionEmu.callCount())
+	}
 	if !emulator.completed() {
 		return errors.New("connector did not POST /v1/complete — see runtime-contract docs")
 	}
@@ -382,6 +423,94 @@ func (e *sidecarEmulator) progressCount() int   { e.mu.Lock(); defer e.mu.Unlock
 func (e *sidecarEmulator) logCount() int        { e.mu.Lock(); defer e.mu.Unlock(); return e.logs }
 func (e *sidecarEmulator) completed() bool      { e.mu.Lock(); defer e.mu.Unlock(); return e.completed_ != "" }
 func (e *sidecarEmulator) completion() string   { e.mu.Lock(); defer e.mu.Unlock(); return e.completed_ }
+
+// ─── extraction sidecar mock ───────────────────────────────────────────
+//
+// In-process mock for the framework's extraction sidecar (Tika + Tesseract).
+// Spawned alongside the runtime emulator when the manifest declares
+// `spec.capabilities.sidecars: [extraction]`. Returns synthetic text for
+// any non-image MIME so the connector author can verify their SDK calls
+// wired correctly. Image MIMEs return 415 — real OCR fidelity needs a
+// cluster pod with Tesseract bundled.
+
+type extractionEmulator struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func newExtractionEmulator() *extractionEmulator { return &extractionEmulator{} }
+
+func (e *extractionEmulator) callCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls
+}
+
+func (e *extractionEmulator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case "/healthz":
+		_, _ = w.Write([]byte("ok\n"))
+	case "/readyz":
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tikaReady":true,"tesseractPath":"(mock)"}`))
+	case "/v1/extract":
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		ct := r.Header.Get("Content-Type")
+		if ct == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"Content-Type header is required","code":"missing-content-type"}`))
+			return
+		}
+		mime := strings.ToLower(strings.TrimSpace(strings.SplitN(ct, ";", 2)[0]))
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 50<<20))
+		e.mu.Lock()
+		e.calls++
+		e.mu.Unlock()
+		if strings.HasPrefix(mime, "image/") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnsupportedMediaType)
+			_, _ = w.Write([]byte(`{"error":"OCR is not modeled by the local emulator; test against a real cluster pod","code":"unsupported"}`))
+			return
+		}
+		filename := r.Header.Get("X-Filename")
+		preview := string(body)
+		if len(preview) > 32 {
+			preview = preview[:32]
+		}
+		text := "EXTRACTED:" + filename
+		if filename == "" {
+			text = "EXTRACTED:" + preview
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"text": text,
+			"tool": "tika",
+			"metadata": map[string]interface{}{
+				"originalContentType": mime,
+				"filename":            filename,
+				"emulator":            true,
+			},
+		})
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+// hasSidecar tests whether `name` appears in a manifest's
+// `spec.capabilities.sidecars` list. Used to gate the extra emulator
+// listener and EXTRACTION_URL env-var injection.
+func hasSidecar(list []string, name string) bool {
+	for _, s := range list {
+		if s == name {
+			return true
+		}
+	}
+	return false
+}
 
 // ─── helpers ───────────────────────────────────────────────────────────
 

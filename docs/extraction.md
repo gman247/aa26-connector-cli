@@ -1,0 +1,210 @@
+# Text extraction (Tika + OCR) from your connector
+
+The framework ships a per-Pod **extraction sidecar** so connectors that need to pull text out of files (PDF, DOCX, XLSX, PPTX, HTML, RTF, ePub, scanned images) don't have to bundle Apache Tika or Tesseract themselves. You opt in via your manifest, call a one-line SDK function from your worker, and the framework handles the rest — image bloat, JVM tuning, startup probes, OCR language packs.
+
+This is the right tool for any connector emitting `content`-bearing findings during sensitive-data scans (the input to the framework's classifier relay). If your connector doesn't deal with files (a permissions-only catalog scanner, a SaaS API that returns text directly), skip the sidecar — it costs ~768 MiB of pod memory.
+
+## TL;DR
+
+1. Add `sidecars: [extraction]` to your manifest's `spec.capabilities`.
+2. Read `EXTRACTION_URL` from your worker's env (the framework sets it for you).
+3. POST file bytes to `${EXTRACTION_URL}/v1/extract` — or use the SDK in your language.
+
+```yaml
+# connector.yaml
+spec:
+  capabilities:
+    operations: [test_connection, scan]
+    scanTypes: [access_scan, sensitive_data_scan]
+    sidecars: [extraction]
+```
+
+```python
+# worker code (Python)
+from aa26_connector_sdk import extract_text, ExtractionError
+
+file_bytes = fetch_object(...)
+try:
+    result = extract_text(file_bytes,
+                          content_type="application/pdf",
+                          filename="report.pdf")
+    finding["content"] = result["text"]
+except ExtractionError as e:
+    log.warning("extraction failed for %s: %s", filename, e)
+    # emit the finding without `content` — V2 just won't classify this object
+```
+
+## What the sidecar can do
+
+* **Tika-routed** (everything except `image/*`):
+  * PDF (text + metadata)
+  * Microsoft Office: DOCX, XLSX, PPTX, plus the older binary formats
+  * OpenDocument: ODT, ODS, ODP
+  * HTML, XHTML, plain text, RTF, ePub
+  * Email: EML, MSG (subject + body + attachments to nested extraction)
+  * 1,000+ formats supported by Apache Tika 2.x
+* **Tesseract-routed** (`image/*`):
+  * PNG, JPEG, TIFF, GIF, WebP — runs OCR with the language packs declared on the sidecar (default: `eng`)
+
+What it does NOT do (yet):
+
+* Streaming extraction (whole file is buffered in memory)
+* OCR on PDFs without an embedded text layer (Phase 2)
+* Custom parsers (Tika's bundle is fixed at the framework's published version)
+
+## HTTP contract — POST /v1/extract
+
+If you're not using one of the SDK clients, you can call the endpoint directly. Request:
+
+```
+POST http://127.0.0.1:8087/v1/extract
+Content-Type: <source mime>            # required; drives tool selection
+X-Filename: <hint>                     # optional; Tika uses for format detection
+X-Languages: eng,spa                   # optional; OCR language hint
+
+<raw file bytes>
+```
+
+Response:
+
+```json
+200 OK
+{
+  "text": "extracted text...",
+  "tool": "tika" | "tesseract",
+  "metadata": {
+    "originalContentType": "application/pdf",
+    "filename": "report.pdf",
+    "xmpTPg:NPages": "12"
+    // Tika-detected fields when applicable
+  }
+}
+```
+
+Failure modes you should handle:
+
+| Status | Code              | Meaning                                              | Recommended action |
+| ------ | ----------------- | ---------------------------------------------------- | ------------------ |
+| 400    | `missing-content-type` | You forgot `Content-Type`                       | Fix the call |
+| 413    | `too-large`       | Body exceeded `MAX_EXTRACT_BYTES` (default 50 MiB)  | Truncate or skip the object |
+| 415    | `unsupported`     | No extractor for that MIME (e.g. `application/x-binary-blob`) | Skip extraction; emit finding without `content` |
+| 500    | `tika-not-ready`  | Sidecar JVM still warming up                        | Retry after a few seconds, or skip and continue |
+| 500    | `tika-failed`     | Tika parser raised on this document                 | Skip; log; consider whether the file is corrupt |
+| 500    | `tesseract-failed` | OCR exec failed                                    | Skip; log |
+| 504    | (transport)       | Extraction exceeded `EXTRACT_TIMEOUT_S` (default 60s) | Skip; log |
+
+The SDK clients map all of these into typed exceptions / errors so your code can branch cleanly. See the language sections below.
+
+## Python SDK
+
+```python
+from aa26_connector_sdk import extract_text, ExtractionError, ExtractionUnavailable
+
+# Inside your scan handler:
+def emit_with_content(obj):
+    file_bytes = fetch(obj.url)
+    try:
+        result = extract_text(
+            file_bytes,
+            content_type=obj.content_type,
+            filename=obj.name,
+        )
+        return {
+            **base_envelope(obj),
+            "content": result["text"],
+        }
+    except ExtractionUnavailable:
+        # Sidecar isn't attached — manifest didn't opt in.
+        # Treat as a permanent skip for this run.
+        return base_envelope(obj)
+    except ExtractionError as e:
+        log.warning("extraction failed: %s", e)
+        return base_envelope(obj)
+```
+
+The package lives at `connector-prototype/sdk/python/`. Install in your image:
+
+```dockerfile
+COPY --from=framework /sdk/python /opt/aa26-sdk
+RUN pip install /opt/aa26-sdk[extraction]
+```
+
+The `[extraction]` extra pulls `requests` only — the SDK's other modules don't need it.
+
+## Bash SDK
+
+```bash
+source /opt/aa26-sdk/extraction.sh
+
+if text=$(aa26_extract_text "$file" "$content_type" "$filename"); then
+  # Compose envelope with content
+  jq -n --arg t "$text" \
+        --arg url "$url" \
+        '{kind:"finding",type:"object_metadata",content:$t,object:{url:$url}}'
+else
+  # aa26_extract_error is set; emit without content
+  echo "[warn] extraction: $aa26_extract_error" >&2
+  jq -n --arg url "$url" \
+        '{kind:"finding",type:"object_metadata",object:{url:$url}}'
+fi | curl -sS -X POST http://127.0.0.1:8089/v1/findings \
+       -H 'Content-Type: application/x-ndjson' --data-binary @-
+```
+
+Requires `curl` and `jq` on your image. The script lives at `connector-prototype/sdk/bash/extraction.sh`.
+
+## Go SDK
+
+```go
+import "github.com/netwrix/connector-sdk-go/extraction"
+
+client := extraction.NewClient() // reads EXTRACTION_URL from env
+
+ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+
+res, err := client.Extract(ctx, fileBytes, "application/pdf",
+    extraction.WithFilename("report.pdf"))
+switch {
+case errors.Is(err, extraction.ErrUnavailable):
+    // Sidecar not attached — proceed without content
+case err != nil:
+    log.Printf("extraction failed: %v", err)
+default:
+    finding["content"] = res.Text
+}
+```
+
+The module is at `connector-prototype/sdk/go/extraction/`.
+
+## Local testing — `aa26-connector test`
+
+The framework's test harness includes a **mock extraction sidecar** so you can iterate on your worker without Docker, Tika, or 700 MB of language packs. When your manifest declares `sidecars: [extraction]`:
+
+```bash
+$ aa26-connector test ./connector.yaml --op=scan
+→ emulator listening on 127.0.0.1:8089
+→ extraction emulator listening on 127.0.0.1:8087 (mock — Tika+OCR are not really running)
+→ running my-connector:dev (op=scan, function_type=scan)
+[FINDING] {"kind":"finding",...,"content":"EXTRACTED:report.pdf"}
+```
+
+The mock returns a synthetic `EXTRACTED:<filename or first 32 bytes>` string for any non-image MIME and 415 for `image/*`. It's intentionally trivial — enough to verify your code wires the call correctly, not enough to test parser fidelity. For real extraction validation, run against the dev cluster pod where Tika is actually executing.
+
+## Resource cost
+
+Per Pod, when you opt in:
+
+| | Request | Limit |
+| --- | --- | --- |
+| CPU | 200m | 1 |
+| Memory | 768 Mi | 1.5 Gi |
+
+Plus the image itself (~350-400 MB), pulled once and cached on the node. Startup probe gives Tika 60 seconds to warm up; on subsequent Pod launches the JVM image is in the kernel cache and warmup drops to ~10 seconds.
+
+If your scans are short and many (lots of small access-scan Pods), the 768 MiB-per-Pod reservation adds up. Don't list `extraction` on a connector that doesn't actually call `/v1/extract`.
+
+## Reference
+
+* [Manifest reference — `spec.capabilities.sidecars`](./manifest-reference.md#speccapabilities) — how to declare the opt-in
+* [CLI — `aa26-connector test`](./cli.md#aa26-connector-test) — local-test flow including the extraction emulator mock
+* [Finding schema](./finding-schema.md) — where the extracted `text` lands on your `content`-bearing finding envelope
