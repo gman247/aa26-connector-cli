@@ -92,22 +92,60 @@ func (e *extractionEmulator) handleExtract(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Synthetic text + entries[]. Mirrors the production shape so author
+	// code that iterates `result.entries` works under the harness too.
+	// For archive MIMEs we fabricate two synthetic inner files at depth 1
+	// so iteration code can be exercised without bundling a real ZIP.
 	filename := r.Header.Get("X-Filename")
 	preview := string(body)
 	if len(preview) > 32 {
 		preview = preview[:32]
 	}
-	text := "EXTRACTED:" + filename
+	containerText := "EXTRACTED:" + filename
 	if filename == "" {
-		text = "EXTRACTED:" + preview
+		containerText = "EXTRACTED:" + preview
 	}
+
+	entries := []map[string]any{
+		{
+			"path":        "",
+			"filename":    filename,
+			"contentType": mime,
+			"depth":       0,
+			"text":        containerText,
+		},
+	}
+	concatText := containerText
+	if mime == "application/zip" || mime == "application/x-tar" || mime == "application/gzip" {
+		entries = append(entries,
+			map[string]any{
+				"path":        "/synthetic-doc-1.pdf",
+				"filename":    "synthetic-doc-1.pdf",
+				"contentType": "application/pdf",
+				"depth":       1,
+				"text":        "EXTRACTED:emulator inner #1",
+			},
+			map[string]any{
+				"path":        "/synthetic-doc-2.txt",
+				"filename":    "synthetic-doc-2.txt",
+				"contentType": "text/plain",
+				"depth":       1,
+				"text":        "EXTRACTED:emulator inner #2",
+			},
+		)
+		concatText = "EXTRACTED:emulator inner #1\n\nEXTRACTED:emulator inner #2"
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"text": text,
-		"tool": "tika",
+		"text":    concatText,
+		"tool":    "tika",
+		"entries": entries,
 		"metadata": map[string]any{
 			"originalContentType": mime,
 			"filename":            filename,
+			"entryCount":          len(entries),
+			"maxDepth":            2,
 			"emulator":            true,
 		},
 	})

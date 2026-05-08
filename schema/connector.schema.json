@@ -164,6 +164,20 @@
             "limits":   { "$ref": "#/$defs/resourceMap" }
           }
         },
+        "extraction": {
+          "type": "object",
+          "description": "Configuration for the extraction sidecar. Only meaningful when capabilities.sidecars includes 'extraction'. Connectors that don't opt into the sidecar may omit this block.",
+          "additionalProperties": false,
+          "properties": {
+            "maxDepth": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10,
+              "default": 2,
+              "description": "How many levels deep the sidecar will recurse into archives. 1 = container only (no archive unwrap). 2 = unwrap one level (typical: ZIP containing PDFs). 3+ = unwrap nested archives (ZIP-of-ZIPs). Default: 2."
+            }
+          }
+        },
         "runtime": {
           "type": "object",
           "properties": {

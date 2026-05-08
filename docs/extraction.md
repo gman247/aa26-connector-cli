@@ -17,7 +17,11 @@ spec:
     operations: [test_connection, scan]
     scanTypes: [access_scan, sensitive_data_scan]
     sidecars: [extraction]
+  extraction:
+    maxDepth: 2     # default — unwrap one level of archive (ZIP → its entries)
 ```
+
+`extraction.maxDepth` is optional. It controls how deep into nested archives the sidecar will recurse before stopping. The default of 2 covers the common case (a ZIP containing PDFs/DOCX). Bump to 3+ when your sources commonly include nested archives. Hard-capped at 10.
 
 ```python
 # worker code (Python)
@@ -70,16 +74,49 @@ Response:
 ```json
 200 OK
 {
-  "text": "extracted text...",
+  "text": "concatenation of every entry's extracted text...",
   "tool": "tika" | "tesseract",
+  "entries": [
+    {
+      "path": "",
+      "filename": "archive.zip",
+      "contentType": "application/zip",
+      "depth": 0,
+      "text": "",
+      "metadata": { /* Tika fields for the container */ }
+    },
+    {
+      "path": "/payroll.pdf",
+      "filename": "payroll.pdf",
+      "contentType": "application/pdf",
+      "depth": 1,
+      "text": "real extracted PDF text...",
+      "metadata": { "xmpTPg:NPages": "12" }
+    }
+  ],
   "metadata": {
-    "originalContentType": "application/pdf",
-    "filename": "report.pdf",
-    "xmpTPg:NPages": "12"
-    // Tika-detected fields when applicable
+    "originalContentType": "application/zip",
+    "filename": "archive.zip",
+    "entryCount": 2,
+    "maxDepth": 2
   }
 }
 ```
+
+For a single PDF / DOCX, `entries` has one element (the container, depth=0) carrying the document's text. For a ZIP, it carries the container plus one element per inner file. **Iterate `entries` and skip `depth=0` to emit one finding per parsed file**; or use the top-level `text` field if you only need the whole-archive blob (e.g. for a single Evidence AI relay per archive). The Python and Go SDKs include `iter_entries()` / `IterInner()` helpers that do the container-skip for you.
+
+### Archive handling
+
+The sidecar uses Tika's `/tika/recursive` endpoint and unwraps these formats automatically:
+
+* ZIP, TAR, GZ, BZ2, 7z, RAR (subject to Tika's parser bundle)
+* Office formats are technically ZIPs internally — Tika handles them transparently with no recursion overhead
+
+Recursion depth is capped at your manifest's `spec.extraction.maxDepth` (default **2** — i.e. unwrap one level of archive). Bump to 3+ if your sources commonly contain nested archives. Cap is hard-limited to 10. Caveats:
+
+* OCR is NOT applied to images inside an archive (Tesseract isn't piped through Tika's recursion).
+* Password-protected entries fail silently — you get whatever Tika could parse before hitting the encrypted block.
+* Spanned/multi-part archives are not supported.
 
 Failure modes you should handle:
 
@@ -98,10 +135,10 @@ The SDK clients map all of these into typed exceptions / errors so your code can
 ## Python SDK
 
 ```python
-from aa26_connector_sdk import extract_text, ExtractionError, ExtractionUnavailable
+from aa26_connector_sdk import extract_text, iter_entries, ExtractionError, ExtractionUnavailable
 
-# Inside your scan handler:
-def emit_with_content(obj):
+# Pattern 1: one finding per object (e.g. one PDF → one finding).
+def emit_one_per_object(obj):
     file_bytes = fetch(obj.url)
     try:
         result = extract_text(
@@ -122,7 +159,30 @@ def emit_with_content(obj):
         return base_envelope(obj)
 ```
 
-The package lives at `connector-prototype/sdk/python/`. Install in your image:
+```python
+# Pattern 2: one finding per archive entry — for ZIP/TAR sources you
+# want enumerated. iter_entries() yields the inner items, skipping the
+# container by default.
+def emit_one_per_entry(obj):
+    archive_bytes = fetch(obj.url)
+    result = extract_text(archive_bytes, content_type="application/zip", filename=obj.name)
+    findings = []
+    for entry in iter_entries(result):       # skips depth=0 container
+        findings.append({
+            "kind": "finding",
+            "type": "object_metadata",
+            "content": entry["text"],
+            "object": {
+                "kind": "file",
+                "id":   f"{obj.url}!{entry['path']}",   # unique per inner file
+                "name": entry["filename"],
+                "contentType": entry["contentType"],
+            },
+        })
+    return findings
+```
+
+The package ships with this CLI repo at `sdk/python/`. Install in your image:
 
 ```dockerfile
 COPY --from=framework /sdk/python /opt/aa26-sdk
@@ -150,7 +210,7 @@ fi | curl -sS -X POST http://127.0.0.1:8089/v1/findings \
        -H 'Content-Type: application/x-ndjson' --data-binary @-
 ```
 
-Requires `curl` and `jq` on your image. The script lives at `connector-prototype/sdk/bash/extraction.sh`.
+Requires `curl` and `jq` on your image. The script ships with this CLI repo at `sdk/bash/extraction.sh`.
 
 ## Go SDK
 
@@ -174,7 +234,11 @@ default:
 }
 ```
 
-The module is at `connector-prototype/sdk/go/extraction/`.
+The module ships with this CLI repo at `sdk/go/extraction/`. Until it's published as its own Go module, vendor the directory or add a `replace` directive in your connector's `go.mod`:
+
+```
+replace github.com/netwrix/connector-sdk-go => /path/to/aa26-connector-cli/sdk/go
+```
 
 ## Local testing — `aa26-connector test`
 
@@ -206,5 +270,6 @@ If your scans are short and many (lots of small access-scan Pods), the 768 MiB-p
 ## Reference
 
 * [Manifest reference — `spec.capabilities.sidecars`](./manifest-reference.md#speccapabilities) — how to declare the opt-in
+* [Manifest reference — `spec.extraction`](./manifest-reference.md#specextraction) — how to set `maxDepth`
 * [CLI — `aa26-connector test`](./cli.md#aa26-connector-test) — local-test flow including the extraction emulator mock
 * [Finding schema](./finding-schema.md) — where the extracted `text` lands on your `content`-bearing finding envelope
