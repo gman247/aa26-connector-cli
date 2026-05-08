@@ -18,6 +18,11 @@ spec:
   capabilities:
     operations: [test_connection, scan]
     scanTypes: [access_scan]
+    # Uncomment if your connector needs to extract text from files
+    # (PDF, DOCX, XLSX, scanned images). The framework attaches a
+    # Tika+Tesseract sidecar at 127.0.0.1:8087; your worker reads
+    # EXTRACTION_URL from env. See docs/extraction.md.
+    # sidecars: [extraction]
   sourceTypes:
     - name: MyObject
       displayName: My object

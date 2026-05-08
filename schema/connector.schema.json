@@ -121,6 +121,15 @@
                 "additionalProperties": false
               },
               "description": "Optional post-processing handlers callable via run-process."
+            },
+            "sidecars": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["extraction"]
+              },
+              "uniqueItems": true,
+              "description": "Framework-managed sidecars to attach to the connector Pod. v1 supports: extraction (Tika + Tesseract for text extraction). When listed, the worker reads EXTRACTION_URL from its env and POSTs file bytes to /v1/extract; see docs/extraction.md."
             }
           }
         },

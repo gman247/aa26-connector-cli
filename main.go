@@ -561,6 +561,27 @@ func executeWorker(
 		_ = server.Shutdown(shutdownTimeout)
 	}()
 
+	// Optional second listener for the extraction sidecar mock. Only
+	// spawned when the manifest declares it, so authors who don't use
+	// extraction don't fight over port 8087. EXTRACTION_URL is set on
+	// the worker by buildWorkerEnv based on the same condition.
+	if manifest.hasSidecar("extraction") {
+		extractionEmu := newExtractionEmulator()
+		extractionListener, err := listenExtractionEmulator()
+		if err != nil {
+			return -1, err
+		}
+		extractionServer := &http.Server{Handler: extractionEmu, ReadHeaderTimeout: 10 * time.Second}
+		go func() { _ = extractionServer.Serve(extractionListener) }()
+		defer func() {
+			shutdownTimeout, scancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer scancel()
+			_ = extractionServer.Shutdown(shutdownTimeout)
+		}()
+		fmt.Fprintf(os.Stderr, "→ extraction emulator listening on %s (mock — Tika+OCR not running)\n",
+			extractionEmulatorAddr)
+	}
+
 	fmt.Fprintf(os.Stderr, "→ emulator listening on %s\n", emulatorAddr)
 	fmt.Fprintf(os.Stderr, "→ running %s (op=%s, function_type=%s)\n",
 		manifest.imageRef, fixture.OperationName(), fixture.Op)
@@ -654,6 +675,19 @@ type manifestSummary struct {
 	imageRef    string
 	pullPolicy  string
 	sourceTypes []ParsedSourceType
+	sidecars    []string // capabilities.sidecars list (e.g. ["extraction"])
+}
+
+// hasSidecar tests whether `name` appears in spec.capabilities.sidecars.
+// Used to gate the extra emulator listener and EXTRACTION_URL env-var
+// injection when the manifest opts into a framework utility sidecar.
+func (m *manifestSummary) hasSidecar(name string) bool {
+	for _, s := range m.sidecars {
+		if s == name {
+			return true
+		}
+	}
+	return false
 }
 
 func loadManifestForTest(path string) (*manifestSummary, error) {
@@ -676,6 +710,13 @@ func loadManifestForTest(path string) (*manifestSummary, error) {
 				Tag        string `json:"tag"`
 				PullPolicy string `json:"pullPolicy"`
 			} `json:"image"`
+			Capabilities struct {
+				// Framework-managed sidecars the connector opted into.
+				// v1: ["extraction"]. When present, the harness spins up
+				// a mock for each so SDK calls succeed without a real
+				// cluster. See docs/extraction.md.
+				Sidecars []string `json:"sidecars"`
+			} `json:"capabilities"`
 		} `json:"spec"`
 	}
 	if err := json.Unmarshal(jsonBytes, &m); err != nil {
@@ -694,6 +735,7 @@ func loadManifestForTest(path string) (*manifestSummary, error) {
 		imageRef:    m.Spec.Image.Repository + ":" + tag,
 		pullPolicy:  m.Spec.Image.PullPolicy,
 		sourceTypes: sourceTypes,
+		sidecars:    m.Spec.Capabilities.Sidecars,
 	}, nil
 }
 
@@ -733,6 +775,12 @@ func buildWorkerEnv(f *Fixture, m *manifestSummary, connection map[string]any) [
 		"SOURCE_VERSION":    nonEmpty(m.version, "1.0.0"),
 		"FUNCTION_TYPE":     f.Op,
 		"REQUEST_DATA":      string(requestJSON),
+	}
+	// Mirror adapter_service.rb's env wiring: when the manifest opts into
+	// the extraction sidecar, expose EXTRACTION_URL so SDK calls resolve
+	// to the harness's mock on the documented localhost port.
+	if m.hasSidecar("extraction") {
+		env["EXTRACTION_URL"] = "http://" + extractionEmulatorAddr
 	}
 	for k, v := range f.Env {
 		env[k] = v

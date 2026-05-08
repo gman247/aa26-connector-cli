@@ -146,6 +146,12 @@ $ aa26-connector package
 
 Validates the manifest first, runs `docker save` on the image declared in `spec.image`, and emits `<name>-<version>.tar.gz`. See [uploading.md](uploading.md) for the full flow.
 
+### Extraction sidecar mock
+
+When your manifest declares `spec.capabilities.sidecars: [extraction]`, the test harness also spins up a **mock extraction sidecar** on a free local port and sets `EXTRACTION_URL` on your worker container. The mock is intentionally thin — it returns synthetic `EXTRACTED:<filename>` text for any non-image MIME so you can verify your code wires the call correctly without needing the real ~350 MB Tika image. Image MIMEs return 415 (no OCR is modeled). For real parser fidelity (PDF font handling, OCR, custom format quirks), test against a real cluster pod where Tika is actually executing. See [extraction.md](extraction.md#local-testing--aa26-connector-test) for the full flow.
+
+You'll see a line like `→ extraction emulator listening on 127.0.0.1:NNNN (mock — Tika+OCR not running)` at startup, and the post-run summary will include an `extractions: N` counter so you can assert your worker called `/v1/extract` the expected number of times.
+
 ## Typical author loop
 
 ```bash
