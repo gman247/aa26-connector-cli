@@ -182,6 +182,21 @@ resources:
   limits:   { cpu: "2",    memory: "2Gi"   }
 ```
 
+## `spec.extraction`
+
+Configuration for the extraction sidecar. Only meaningful when `capabilities.sidecars` includes `extraction`. Connectors that don't use the sidecar may omit this block entirely.
+
+```yaml
+extraction:
+  maxDepth: 2     # how many levels deep to recurse into archives
+```
+
+| Field | Type | Default | Range | Meaning |
+| --- | --- | --- | --- | --- |
+| `maxDepth` | integer | 2 | 1–10 | How deep the sidecar recurses into archives. `1` = container only (no archive unwrap). `2` = unwrap one level (typical: ZIP containing PDFs). `3+` = unwrap nested archives (ZIP-of-ZIPs). |
+
+The framework injects this value as `EXTRACTION_MAX_DEPTH` on the sidecar. Entries returned by `/v1/extract` are filtered to drop anything past the configured depth. See [extraction.md](./extraction.md#archive-handling) for behavior details.
+
 ## `spec.runtime`
 
 ```yaml
