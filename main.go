@@ -820,6 +820,7 @@ func runWorker(ctx context.Context, imageRef string, env []string, done <-chan s
 		// macOS / Windows: host.docker.internal reaches the host from inside a container.
 		args = []string{"run", "--rm"}
 		env = append(env, "SIDECAR_URL=http://host.docker.internal:8089")
+		env = append(env, "EXTRACTION_URL=http://host.docker.internal:8087")
 	}
 	for _, e := range env {
 		args = append(args, "-e", e)
