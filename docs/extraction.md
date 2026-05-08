@@ -182,7 +182,7 @@ def emit_one_per_entry(obj):
     return findings
 ```
 
-The package lives at `connector-prototype/sdk/python/`. Install in your image:
+The package ships with this CLI repo at `sdk/python/`. Install in your image:
 
 ```dockerfile
 COPY --from=framework /sdk/python /opt/aa26-sdk
@@ -210,7 +210,7 @@ fi | curl -sS -X POST http://127.0.0.1:8089/v1/findings \
        -H 'Content-Type: application/x-ndjson' --data-binary @-
 ```
 
-Requires `curl` and `jq` on your image. The script lives at `connector-prototype/sdk/bash/extraction.sh`.
+Requires `curl` and `jq` on your image. The script ships with this CLI repo at `sdk/bash/extraction.sh`.
 
 ## Go SDK
 
@@ -234,7 +234,11 @@ default:
 }
 ```
 
-The module is at `connector-prototype/sdk/go/extraction/`.
+The module ships with this CLI repo at `sdk/go/extraction/`. Until it's published as its own Go module, vendor the directory or add a `replace` directive in your connector's `go.mod`:
+
+```
+replace github.com/netwrix/connector-sdk-go => /path/to/aa26-connector-cli/sdk/go
+```
 
 ## Local testing — `aa26-connector test`
 
