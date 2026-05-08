@@ -23,6 +23,20 @@ spec:
     # Tika+Tesseract sidecar at 127.0.0.1:8087; your worker reads
     # EXTRACTION_URL from env. See docs/extraction.md.
     # sidecars: [extraction]
+  sourceTypes:
+    - name: MyObject
+      displayName: My object
+      domain: Artifact
+      ingestion:
+        target: entities
+        mapping:
+          sourceSystemId:  $.object.id      # required for stable entity IDs across re-scans
+          name:            $.object.id      # replace with a human-friendly name field
+          sizeBytes:       $.object.size
+          # contentType:   $.object.contentType
+          # modifiedDate:  $.evidence.raw.lastModified
+        additionalProperties:
+          # %s.myField: $.evidence.raw.myField
   credentials:
     schema:
       type: object
@@ -39,8 +53,8 @@ spec:
     findingTypes: [object_metadata]
 `
 
-// Argument order for sprintf: name, displayName, version, image-segment.
-// Caller passes name twice (once for displayName as a placeholder).
+// Argument order for sprintf: name, displayName, version, image-segment, name (for additionalProperties comment).
+// Caller passes name twice for image-segment and additionalProperties comment.
 
 // — bash skeleton —
 
@@ -72,7 +86,7 @@ case "$op" in
         --argjson sz "$(stat -c %s "$f" 2>/dev/null || echo 0)" '{
           schemaVersion:"1.0", kind:"finding",
           executionId:$eid, occurredAt:$ts,
-          type:"object_metadata",
+          type:"object_metadata", sourceType:"MyObject",
           object:{kind:"file", id:$p, path:$p, size:$sz}
         }'
     done | curl -sf -X POST -H 'Content-Type: application/x-ndjson' --data-binary @- "$S/v1/findings"
@@ -171,6 +185,7 @@ def run_scan(invocation):
                 "sourceId": source_id,
                 "occurredAt": now(),
                 "type": "object_metadata",
+                "sourceType": "MyObject",
                 "object": {"kind": "file", "id": full, "path": full, "size": size},
             })
             if len(findings) >= 100:

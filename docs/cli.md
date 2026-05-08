@@ -1,14 +1,22 @@
 # `aa26-connector` CLI
 
-The CLI is the fastest path from "I want to write a connector" to "I have a working connector running locally". Three subcommands.
+The CLI is the fastest path from "I want to write a connector" to "I have a working connector running locally". Five subcommands.
 
 ```
 aa26-connector new <name> --lang=python|bash [--dir=PATH]
 aa26-connector validate [PATH]
-aa26-connector test [PATH] --root=DIR [--op=scan|test_connection]
+aa26-connector lint [PATH] [--strict]
+aa26-connector test [PATH] [flags]
+aa26-connector package [--out=FILE]
 ```
 
-It's a single static Go binary with no dependencies. On the prototype VM it's already at `/usr/local/bin/aa26-connector`. On your machine, `cd /home/azureuser/connector-prototype/cli && make install` (sudo).
+It's a single static Go binary with no dependencies. On the prototype VM it's already at `/usr/local/bin/aa26-connector`. To install on your own machine:
+
+```bash
+git clone https://github.com/gman247/aa26-connector-cli.git
+cd aa26-connector-cli
+make install   # go install → ~/go/bin/aa26-connector
+```
 
 ## `aa26-connector new`
 
@@ -47,30 +55,96 @@ jsonschema: '/apiVersion' does not validate with .../connector.schema.json#/prop
 
 The error always points at the offending JSON path and explains what was expected. Same validator the registry runs at admission time, so "validate ok here" means "Ready in registry there."
 
-## `aa26-connector test`
+## `aa26-connector lint`
 
-Runs your connector image against an in-process sidecar emulator. The emulator stands in for the real runtime sidecar — same HTTP API, same endpoints — but everything stays on your laptop. No cluster needed.
+Statically scans connector source for known HTTP/JSON anti-patterns. Every rule maps to a real production failure that already happened to a real connector — the goal is "this exact bug class can't ship again."
 
 ```bash
-$ aa26-connector test --root=/etc --op=scan
-✓ connector.yaml is valid
-→ running localhost/snowflake:dev (op=scan, root=/etc)
-  findings batch ( 50  events)
-  findings batch ( 47  events)
-
-✓ test complete
-  invocations:  1
-  findings:     97
-  progress:     2
-  logs:         0
-  status:       completed
+$ aa26-connector lint
+✓ lint clean
 ```
 
-The emulator captures everything your connector POSTs and prints a summary. If your connector forgot to call `/v1/complete`, the test fails with a pointer to the runtime contract. If it crashes, the container's stdout/stderr is shown.
+```bash
+$ aa26-connector lint
+⚠ [R001/warn] connector.py:60: json.load(resp) on a urllib response will crash on 204/empty bodies (e.g. cold-start /v1/checkpoint). Check resp.status == 204 first or read+strip the body.
+    return json.load(resp)
+0 error(s), 1 warning(s)
+```
+
+Rule reference:
+
+| Rule | Languages | Severity | Catches |
+|------|-----------|----------|---------|
+| R001 | Python    | warn     | `json.load(resp)` on a `urllib` response |
+| R002 | Python    | warn     | `requests.<verb>(...).json()` without 204 guard |
+| R003 | Go        | warn     | `json.NewDecoder(resp.Body).Decode` without `StatusNoContent` check |
+| R004 | TS / JS   | warn     | `await response.json()` after `fetch()` without status check |
+| R005 | All       | error    | Sidecar URL drift (port ≠ 8089, `runtime:` host) |
+
+`--strict` promotes warnings to failures. The lint also runs automatically at the start of `aa26-connector test`; pass `--skip-lint` to bypass.
+
+## `aa26-connector test`
+
+Runs your connector image against an in-process sidecar emulator (or, with `--real-runtime`, the production runtime container). The emulator stands in for the real runtime sidecar — same HTTP API, same endpoints — but everything stays on your laptop. No cluster needed.
+
+```bash
+$ aa26-connector test
+✓ connector.yaml is valid
+→ lint clean
+→ emulator listening on 127.0.0.1:8089
+→ running localhost/snowflake:dev (op=access_scan, function_type=access-scan)
+worker | starting scan...
+worker | wrote 97 findings
+
+─── summary ───────────────────────────────────────
+  invocations:  1
+  findings:     97 (valid: 97)
+  progress:     2
+  log events:   0 (errors: 0)
+  status:       completed
+  coverage:
+    ✓ GET  /v1/invocation     1x
+    · GET  /v1/checkpoint     0x
+    · POST /v1/checkpoint     0x
+    ✓ POST /v1/findings       2x
+    ✓ POST /v1/progress       2x
+    · POST /v1/log            0x
+    · GET  /v1/control        0x
+    · POST /v1/process        0x
+    ✓ POST /v1/complete       1x
+  result:       ✓ pass
+```
+
+The emulator captures everything your connector POSTs and prints a summary. The coverage table shows which sidecar endpoints your worker actually hit — a cheap way to spot untested code paths. On first-call failures (worker exits non-zero before `/v1/complete`), the summary includes a **forensic block** with the last sidecar interaction, recent worker output, and a heuristic root-cause hint.
 
 Required: a built image matching `spec.image.repository:spec.image.tag` from your manifest. Tag defaults to `dev` if omitted in the manifest.
 
-`--op=test_connection` runs the test_connection path; `--op=scan` (default) runs scan.
+### Flags
+
+| Flag                | Effect |
+|---------------------|--------|
+| `--fixture=FILE`    | Use `FILE` instead of `./test-fixture.yaml` (missing file is fine) |
+| `--non-interactive` | Don't prompt; missing required field → fail. Use this in CI. |
+| `--save-fixture`    | After resolving prompts, write the answers back to the fixture file. |
+| `--keep-going`      | Don't exit non-zero on expectation failure (lets you read the diff). |
+| `--probe-contract`  | Run the worker through every contract probe scenario (cold start, warm start, sidecar errors). Slower; cleanest pre-PR check. |
+| `--real-runtime`    | Run the production runtime container instead of the in-process emulator. Eliminates emulator drift. |
+| `--runtime-image=X` | Override the runtime image used by `--real-runtime`. |
+| `--strict`          | Fail on lint warnings, not just errors. |
+| `--skip-lint`       | Skip the pre-flight lint pass. |
+
+See [test-harness.md](test-harness.md) for the full reference: fixture format, fault-injection via `emulator.responses`, the probe matrix, and real-runtime mode.
+
+## `aa26-connector package`
+
+Bundles the current directory into a deployable `.tar.gz` for upload to AA26 via the **+ Add New Source** UI.
+
+```bash
+$ aa26-connector package
+✓ wrote my-connector-0.1.0.tar.gz (12.4 MB)
+```
+
+Validates the manifest first, runs `docker save` on the image declared in `spec.image`, and emits `<name>-<version>.tar.gz`. See [uploading.md](uploading.md) for the full flow.
 
 ### Extraction sidecar mock
 
@@ -90,14 +164,16 @@ cd my-connector
 
 # 3. Loop fast
 aa26-connector validate
+aa26-connector lint
 docker build -t localhost/my-connector:dev .
-aa26-connector test --root=/some/test/dir
+aa26-connector test --save-fixture       # first run; saves your prompt answers
 
-# 4. When happy, ship
-sudo cp -r ../my-connector /var/lib/aa26/connectors/my-connector
-# registry picks it up; check status:
-kubectl -n connector-prototype port-forward svc/connector-registry 8090:8090 &
-curl -s http://localhost:8090/status | jq '.connectors[] | select(.name=="my-connector")'
+# 4. Once happy, run the full contract probe
+aa26-connector test --probe-contract --strict --non-interactive
+
+# 5. Ship
+aa26-connector package
+# → upload my-connector-0.1.0.tar.gz at /connector-upload/
 ```
 
 ## What the CLI doesn't do (yet)
@@ -112,3 +188,5 @@ curl -s http://localhost:8090/status | jq '.connectors[] | select(.name=="my-con
 - **"docker without sudo failed — retrying with sudo"**: harmless. Your user isn't in the `docker` group on this host. Run `sudo usermod -aG docker $USER && newgrp docker` to fix permanently, or ignore it.
 - **"could not find connector.schema.json"**: you're running the CLI from a non-standard location. Set `CONNECTOR_SCHEMA=/path/to/connector.schema.json`.
 - **`test` exits with "connector did not POST /v1/complete"**: your handler runs, emits findings, then exits without telling the framework it's done. Add a `POST /v1/complete` at the end. See [runtime contract](runtime-contract.md#post-v1complete).
+- **`test` lint flags `R001` / `R002`**: your sidecar client calls `json.load(resp)` or `.json()` on a response that may be 204 with an empty body. The most common offender is `GET /v1/checkpoint` — the production sidecar returns 204 when no checkpoint exists. Check `resp.status == 204` (urllib) or `resp.status_code != 204` (requests) before parsing.
+- **`--probe-contract` shows `cold-start ✗ / warm-start ✓`**: the connector handles the resume path but crashes when no checkpoint exists. Same root cause as R001/R002 above.
