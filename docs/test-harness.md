@@ -89,9 +89,47 @@ matches what `runtime/main.go` returns in production.
 
 When `spec.auth.methods` declares more than one method, pin which one
 the harness uses by `type` (`basic`, `bearer`, `api_key`,
-`service_account`, `none`). Without it: a single declared method is
-auto-selected; multiple require either an interactive picker or this
-field; `--non-interactive` prefers `none` if present, otherwise errors.
+`service_account`, `oauth2`, `none`). Without it: a single declared
+method is auto-selected; multiple require either an interactive picker
+or this field; `--non-interactive` prefers `none` if present, otherwise
+errors.
+
+### OAuth2 testing
+
+> **Status:** the test config schema below is the **planned** OAuth2
+> surface that lands alongside the framework's OAuth2 v1 implementation.
+> Token-injection mode is the highest priority and is the recommended
+> way to test today — the mock-provider and browser modes are deferred
+> to a follow-up CLI release. The doc reflects the contract authors will
+> code against; nothing here changes how non-OAuth tests work.
+
+When the manifest declares `type: oauth2`, the harness has three modes:
+
+| Mode | When to use | How |
+|---|---|---|
+| **Token-injection** | You already have a valid access token; skip the entire auth dance | `oauthToken: "sl.B..."` in the test config, or `--oauth-token <token>` on the CLI |
+| **Mock provider** | CI / unit testing; no real provider needed | `oauthMode: mock` — harness spins up a local stub that accepts any client/state/code and returns a synthetic token |
+| **Real browser** | End-to-end testing against the actual provider | `oauthMode: browser` — harness opens your default browser, walks you through real consent, captures the callback, runs your connector with the real token |
+
+```yaml
+# test.yaml
+authMethod: oauth2
+oauthMode: browser
+clientCredentials:
+  DROPBOX_OAUTH_CLIENT_ID: ${DROPBOX_OAUTH_CLIENT_ID}
+  DROPBOX_OAUTH_CLIENT_SECRET: ${DROPBOX_OAUTH_CLIENT_SECRET}
+```
+
+In mock mode the harness exposes:
+- `extras` map populated with synthetic values for each `extraTokenFields`
+  entry your manifest declares (e.g. `instance_url: "https://mock.example"`).
+- A `--simulate-expiry-in <seconds>` flag that backdates `expires_at` so
+  you can exercise your 401-retry path without waiting.
+- A `--simulate-needs-reauth` flag that makes the next `/v1/credentials`
+  call return 503 with `X-OAuth-State: needs_reauthorization`, so you
+  can verify your connector handles that path cleanly.
+
+See **[oauth2.md](oauth2.md)** for the full OAuth2 guide.
 
 ### `connection`
 
