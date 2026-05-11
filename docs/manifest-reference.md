@@ -252,7 +252,27 @@ auth:
 | `none` | Connector takes no credentials. Wizard skips the Credentials section entirely if this is the only method declared. |
 | `basic` / `bearer` / `api_key` | Inline credentials. The wizard renders the method's `fields` JSON Schema; values land in a per-source k8s Secret created by `ConnectorAuthHandler`. |
 | `service_account` | Reuses AA26's existing Service Account picker. `accountTypes` (optional) restricts the picker to specific SA flavors. |
+| `oauth2` | The framework's OAuth2 engine. Declares the provider's authorize/token URLs, scopes, and optional knobs; the framework handles redirect, callback, storage, refresh, and runtime token delivery. Your connector reads the current token from `GET /v1/credentials`. See **[oauth2.md](oauth2.md)** for the full guide. |
 | `custom` | Same as inline but for connector-specific shapes that don't fit basic/bearer/api_key. Fields are arbitrary; what gets stored is opaque to the framework. |
+
+### OAuth2 fields
+
+When `type: oauth2`, these additional fields apply (full details in **[oauth2.md](oauth2.md)**):
+
+| Field | Required | Description |
+|---|---|---|
+| `provider` | yes | Short name (e.g. `dropbox`, `google`, `microsoft`, `salesforce`). Maps to deployment env vars `<PROVIDER>_OAUTH_CLIENT_ID/_SECRET` and to the callback URL path. |
+| `authorizationUrl` | yes\* | Provider's authorize endpoint. May contain `{field}` placeholders. |
+| `tokenUrl` | yes\* | Provider's token endpoint. May contain `{field}` placeholders. |
+| `scopes` | yes\* | Array of scope strings requested at consent. |
+| `pkce` | no | `true` (default) / `false`. Use `true` unless the provider genuinely doesn't support PKCE. |
+| `revocationUrl` | no | RFC 7009 revoke endpoint, called best-effort on source delete. |
+| `extraAuthParams` | no | Map of provider-specific query params appended to the authorize URL (e.g. `token_access_type: offline` for Dropbox). |
+| `extraTokenFields` | no | Array of non-standard token-response fields to persist + inject (e.g. `instance_url` for Salesforce). |
+| `urlParams` | no | Pre-auth user-input substitutions for tenant-scoped URLs (M365 `tenantId`). |
+| `customAuthAdapter` | no | Escape hatch: `host:port` your connector image exposes to handle authorize/exchange/refresh for providers the declarative engine can't model. Mutually exclusive with `authorizationUrl`/`tokenUrl`/`scopes`. |
+
+\* Required unless `customAuthAdapter` is set.
 
 ### `scope`
 

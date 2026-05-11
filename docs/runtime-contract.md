@@ -15,9 +15,17 @@ sequenceDiagram
   K->>C: start
   C->>S: GET /v1/invocation
   S-->>C: {operation, executionId, source, scan, ...}
+  opt OAuth-backed connector
+    C->>S: GET /v1/credentials
+    S-->>C: {access_token, expires_at, extras}
+  end
   loop for each batch
     C->>S: POST /v1/findings (NDJSON)
     C->>S: POST /v1/progress
+    opt 401 from provider
+      C->>S: GET /v1/credentials (refresh)
+      S-->>C: {access_token (fresh)}
+    end
   end
   C->>S: POST /v1/complete {status:"completed"}
   S-->>C: {status:"ok"}
@@ -152,6 +160,42 @@ curl -sf -X POST -H 'Content-Type: application/json' \
 ```
 
 `status` ∈ `{completed, failed, cancelled}`. Body is freeform — whatever's useful in the Scan Executions detail view. The sidecar exits shortly after responding to this call; the Job ends as soon as both your container and the sidecar are gone.
+
+### `GET /v1/credentials`
+
+OAuth-backed connectors only. Returns the current access token. The
+sidecar serves from an in-memory cache and transparently refreshes through
+core-api when the cached token is within 60s of expiry. Non-OAuth scans
+get **404** — never call this endpoint from a connector that uses
+`auth: bearer` / `api_key` / `service_account` / `none`.
+
+```bash
+curl -sf http://127.0.0.1:8089/v1/credentials
+```
+
+```json
+{
+  "access_token": "sl.B1234567890abcdef...",
+  "token_type":   "Bearer",
+  "expires_at":   "2026-05-11T18:42:13Z",
+  "scope":        "files.metadata.read files.content.read",
+  "extras": {
+    "instance_url": "https://na1.salesforce.com"
+  }
+}
+```
+
+| Status | Meaning |
+|---|---|
+| **200** | Fresh credentials. Use `access_token` in your `Authorization: Bearer …` header. |
+| **404** | OAuth not configured for this scan. Connector is not OAuth-backed (e.g. uses `auth: bearer`). |
+| **503** with `X-OAuth-State: needs_reauthorization` | Refresh permanently failed (user revoked the app, refresh token expired). Source needs the user to click "Re-connect" in the AA webapp. Fail the scan with a clear error. |
+| **502** | Transient core-api error (network, 5xx). Retry the request — the sidecar will retry the refresh. |
+
+**Calling pattern** — see **[oauth2.md §"The runtime contract"](oauth2.md#the-runtime-contract)** for the full pattern. The short version:
+
+- **MUST** call `GET /v1/credentials` again whenever the provider returns 401. This is the correctness contract — the sidecar will refresh and return a fresh token.
+- **MAY** call `GET /v1/credentials` proactively between batches as an optimization to avoid the 401-retry latency hit.
 
 ### `GET /healthz`
 

@@ -42,10 +42,12 @@ The framework you're reading about does the opposite of all of that. It picks an
 - **[Manifest reference](manifest-reference.md)** — every field of `connector.yaml`
 - **[Runtime contract](runtime-contract.md)** — the HTTP API your container talks to
 - **[Finding schema](finding-schema.md)** — what your output looks like
+- **[OAuth2](oauth2.md)** — declare a SaaS data source's OAuth2 provider and let the framework handle the entire auth flow. Connector reads the access token from one HTTP call; no OAuth code anywhere.
 - **[Extraction](extraction.md)** — how to use the framework's Tika+OCR sidecar to pull text from PDF/DOCX/scanned images without bundling Apache Tika yourself
 - **[CLI](cli.md)** — `aa26-connector new / validate / test / package`
 - **[Hello-world example](examples/hello-world.md)** — annotated walkthrough
 - **[Databricks example](examples/databricks.md)** — a more realistic skeleton
+- **[Dropbox example](examples/dropbox.md)** — OAuth2 walkthrough with a real provider
 
 ## Already have a tarball?
 

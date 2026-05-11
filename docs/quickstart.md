@@ -163,5 +163,6 @@ Five things, each of which the framework does so you didn't have to:
 - Read the **[manifest reference](manifest-reference.md)** when your connector grows credentials, multiple scan types, or capability metadata.
 - Read the **[runtime contract](runtime-contract.md)** when you need progress reporting, checkpoints, or the long-poll control endpoint.
 - Read the **[finding schema](finding-schema.md)** when you want to emit `access_grant` or `sensitive_match` findings, not just `object_metadata`.
+- Read **[OAuth2](oauth2.md)** if your data source uses OAuth2 (Dropbox, Google Drive, M365, Salesforce, Slack, …). The framework owns the whole flow; your connector reads the token from one HTTP call.
 - Read **[extraction](extraction.md)** if your connector needs to pull text out of files (PDF, DOCX, scanned images, etc.) — the framework ships a Tika+Tesseract sidecar so you don't bundle either yourself.
-- Look at **[examples/databricks](examples/databricks.md)** for a more realistic OAuth-authenticated connector.
+- Look at **[examples/databricks](examples/databricks.md)** for a more realistic skeleton, or **[examples/dropbox](examples/dropbox.md)** for an end-to-end OAuth2 walkthrough.
