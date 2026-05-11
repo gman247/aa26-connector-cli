@@ -51,7 +51,7 @@ spec:
 ```yaml
 image:
   repository: ghcr.io/netwrix/connectors/snowflake   # required
-  tag: 1.2.0                                          # optional
+  tag: 1.2.0                                          # required — must match metadata.version
   digest: sha256:abc123...                            # required for signed installs
   pullPolicy: IfNotPresent                            # default
   signing:                                            # optional
@@ -61,6 +61,47 @@ image:
 ```
 
 The framework launches your container as `repository@digest` if `digest` is set, or `repository:tag` otherwise. **In production, set both digest and signing**; the framework rejects unsigned community connectors unless the cluster operator explicitly allows them.
+
+### Versioned image tags (required at package time)
+
+**Pin `spec.image.tag` to the same value as `metadata.version`.** `aa26-connector package` enforces this strictly; `aa26-connector lint` rule **R007** warns when the tag is floating (`dev` or `latest`). The bug class this prevents:
+
+1. Connector author releases v0.2.0; bundle ships an image tagged `:dev`. Cluster imports it, kubelet runs it under that tag — fine.
+2. Author makes changes, releases v0.2.1; bundle ships a new image also tagged `:dev`. Cluster registers a new `source_types` row for v0.2.1 — but if anything in the import chain misses (image not retagged, ctr cache not refreshed, etc.), kubelet's `pullPolicy: Never` lookup for `:dev` still resolves to the v0.2.0 image bytes.
+3. Pods spawned for v0.2.1 sources run v0.2.0 code. No error from kubelet (the tag resolves successfully), no warning anywhere. The "new" version's bug fixes are invisible.
+
+Pinning the tag to `metadata.version` makes this impossible: kubelet either finds the exact image for the version row it's launching, or fails loud with `ErrImageNeverPull`. The `source_types` row, the bundle's `image.tar`, and the running pod are forced into lockstep on every release.
+
+**Recommended pattern:**
+
+```yaml
+metadata:
+  name: snowflake
+  version: 1.2.0
+
+spec:
+  image:
+    repository: ghcr.io/netwrix/connectors/snowflake
+    tag: 1.2.0          # ← same as metadata.version above
+    pullPolicy: Never   # for in-cluster registry use
+```
+
+**Mechanical:** drive both fields from a single source of truth in your release pipeline. The Makefile pattern below derives `tag` from `metadata.version` so they can't drift:
+
+```makefile
+VERSION := $(shell grep '^  version:' connector.yaml | head -1 | awk '{print $$2}')
+IMG     := localhost/connector-framework/snowflake:$(VERSION)
+
+image:
+	sudo docker build -t $(IMG) .
+
+bundle: image
+	sudo docker save $(IMG) -o image.tar
+	tar -czf snowflake-$(VERSION).tar.gz connector.yaml image.tar README.md
+	rm -f image.tar
+```
+
+`aa26-connector package` rejects a manifest where `tag` and `version` disagree before running `docker save` — see [cli.md](cli.md#aa26-connector-package) for the exact failure message and remediation.
 
 ## `spec.capabilities`
 
