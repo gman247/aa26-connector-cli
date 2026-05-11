@@ -967,6 +967,7 @@ func printSummary(r *RunResult, failures []string, m *manifestSummary, flags tes
 // the canonical ordering used in docs/runtime-contract.md so the report
 // reads top-to-bottom the way the contract is documented.
 var coverageEndpoints = []struct{ Method, Path string }{
+	{"GET", "/healthz"},
 	{"GET", "/v1/invocation"},
 	{"GET", "/v1/checkpoint"},
 	{"POST", "/v1/checkpoint"},
