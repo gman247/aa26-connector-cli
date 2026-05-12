@@ -94,9 +94,16 @@ method is auto-selected; multiple require either an interactive picker
 or this field; `--non-interactive` prefers `none` if present, otherwise
 errors.
 
+!!! warning "Not yet implemented"
+    The OAuth2 test harness features described in this section — token injection (`--oauth-token`, `oauthToken:`), mock provider (`oauthMode: mock`), browser flow (`oauthMode: browser`), and expiry simulation (`--simulate-expiry-in`, `--simulate-needs-reauth`) — are **planned but not yet implemented** in the CLI.
+
+    Setting these options today has no effect; they are silently ignored.
+
+    **Current workaround:** test OAuth2 connectors by uploading to a cluster and running a scan against a real or sandbox source. Use the `--oauth-token` flag format as documentation of the intended interface — it will work once the implementation lands.
+
 ### OAuth2 testing
 
-> **Status:** the test config schema below is the **planned** OAuth2
+> **Status:** the test config schema below is the **planned for a future release — not available today** OAuth2
 > surface that lands alongside the framework's OAuth2 v1 implementation.
 > Token-injection mode is the highest priority and is the recommended
 > way to test today — the mock-provider and browser modes are deferred
