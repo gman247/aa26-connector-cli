@@ -10,13 +10,10 @@ generalize to any provider.
 A connector that:
 1. Authenticates to Dropbox via OAuth2.
 2. Enumerates files in the user's Dropbox account.
-3. Downloads each file's content and emits it as `object_metadata`
-   findings with a `content` field, which the framework's classifier
-   relay forwards to Evidence AI for sensitive-data detection.
+3. On **sensitive_data_scan**: downloads each file's content and emits it as `object_metadata` findings with a `content` field, which the framework's classifier relay forwards to Evidence AI for sensitive-data detection.
+4. On **access_scan**: calls `sharing/list_file_members` for each shared file and emits `access_grant` findings routed to the `permissions` ClickHouse table.
 
-The OAuth dance is handled entirely by the framework. The connector's
-code is plain "call the Dropbox API with a Bearer token" — no redirect
-handling, no token exchange, no refresh logic.
+The OAuth dance is handled entirely by the framework. The connector's code is plain "call the Dropbox API with a Bearer token" — no redirect handling, no token exchange, no refresh logic.
 
 ## File layout
 
@@ -48,7 +45,7 @@ spec:
     tag: 0.1.0
 
   capabilities:
-    scanTypes: [sensitive_data_scan]
+    scanTypes: [access_scan, sensitive_data_scan]
     operations: [test_connection, scan]
 
   source:
@@ -84,10 +81,28 @@ spec:
       ingestion:
         target: entities
         mapping:
-          name:           [object, name]
-          sourceSystemId: [object, id]
-          size_bytes:     [object, size]
-          modified_time:  [object, server_modified]
+          name:           $.object.name
+          sourceSystemId: $.object.id
+          sizeBytes:      $.object.size
+          modifiedDate:   $.object.server_modified
+          contentHash:    $.object.content_hash
+
+    # DropboxPermission routes access_grant findings to the permissions table.
+    # Must be a distinct name from DropboxFile — sharing a name would cause
+    # the runtime to route both finding types through the same mapping.
+    - name: DropboxPermission
+      ingestion:
+        target: permissions
+        mapping:
+          permissionGrantId: $.subject.id
+          aceType:           $.permissions.aceType
+          memberRole:        $.permissions.memberRole
+          readAllowed:       $.permissions.readAllowed
+          writeAllowed:      $.permissions.writeAllowed
+          deleteAllowed:     $.permissions.deleteAllowed
+          manageAllowed:     $.permissions.manageAllowed
+          adminAllowed:      $.permissions.adminAllowed
+          listAllowed:       $.permissions.listAllowed
 ```
 
 The `auth.methods[].type=oauth2` block is everything you need for OAuth.

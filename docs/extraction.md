@@ -23,6 +23,8 @@ spec:
 
 `extraction.maxDepth` is optional. It controls how deep into nested archives the sidecar will recurse before stopping. The default of 2 covers the common case (a ZIP containing PDFs/DOCX). Bump to 3+ when your sources commonly include nested archives. Hard-capped at 10.
 
+> **⚠️ Indentation gotcha — `sidecars` must nest under `capabilities`.** Core-api reads sidecar declarations from `spec.capabilities.sidecars` only. A `sidecars: [extraction]` line at `spec.sidecars` (peer to `capabilities`) is silently accepted by the YAML parser and ignored by the framework — your SDS pod will ship **without** the extraction container, your worker's `EXTRACTION_URL` will be unset, and binary files (PDF/DOCX/XLSX/…) will emit findings with no `content` so the classifier never sees them. Symptom on a running scan: SDS pod terminates fast, entities populate fine, but `v2_document_assessments` stays empty and no `/classify` traffic shows up in the classifier logs. `aa26-connector lint` flags this misplacement; run it before uploading.
+
 ```python
 # worker code (Python)
 from aa26_connector_sdk import extract_text, ExtractionError

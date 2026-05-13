@@ -41,7 +41,22 @@
         "object":  { "$ref": "#/$defs/entityRef" },
         "predicate": {
           "type": "object",
-          "description": "Relationship between subject and object. Shape depends on finding type. For access_grant: {permission, inherited?, via?}. For sensitive_match: {match, classifier, region?, sample?}. For object_metadata: typically empty.",
+          "description": "Relationship between subject and object. Shape depends on finding type. For sensitive_match: {match, classifier, region?, sample?}. For object_metadata: typically empty. For access_grant: use the top-level 'permissions' block instead (aceType, memberRole, readAllowed, writeAllowed, deleteAllowed, manageAllowed, adminAllowed, listAllowed).",
+          "additionalProperties": true
+        },
+        "permissions": {
+          "type": "object",
+          "description": "Permission flags for access_grant findings. The runtime maps these to the permissions ClickHouse table via the sourceType's ingestion.mapping.",
+          "properties": {
+            "aceType":      { "type": "string", "enum": ["Allow", "Deny"] },
+            "memberRole":   { "type": "string", "enum": ["Owner", "Member", "Guest"] },
+            "readAllowed":   { "type": "boolean" },
+            "writeAllowed":  { "type": "boolean" },
+            "deleteAllowed": { "type": "boolean" },
+            "manageAllowed": { "type": "boolean" },
+            "adminAllowed":  { "type": "boolean" },
+            "listAllowed":   { "type": "boolean" }
+          },
           "additionalProperties": true
         },
         "evidence": {
@@ -108,7 +123,11 @@
           "type": "string",
           "description": "Stable identifier within the source (e.g. file path, URN, GUID)."
         },
-        "displayName": { "type": "string" },
+        "displayName":    { "type": "string" },
+        "canonicalEmail": {
+          "type": "string",
+          "description": "For access_grant subject: the principal's login email. The runtime derives principalId (a stable UUIDv5) from this field so the same person is linked across connectors. Required for access_grant findings to land correctly in the permissions table."
+        },
         "path":        { "type": "string" },
         "size":        { "type": "integer", "minimum": 0 },
         "url":         { "type": "string", "format": "uri" }

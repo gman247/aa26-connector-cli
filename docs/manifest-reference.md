@@ -51,7 +51,7 @@ spec:
 ```yaml
 image:
   repository: ghcr.io/netwrix/connectors/snowflake   # required
-  tag: 1.2.0                                          # optional
+  tag: 1.2.0                                          # required — must match metadata.version
   digest: sha256:abc123...                            # required for signed installs
   pullPolicy: IfNotPresent                            # default
   signing:                                            # optional
@@ -61,6 +61,47 @@ image:
 ```
 
 The framework launches your container as `repository@digest` if `digest` is set, or `repository:tag` otherwise. **In production, set both digest and signing**; the framework rejects unsigned community connectors unless the cluster operator explicitly allows them.
+
+### Versioned image tags (required at package time)
+
+**Pin `spec.image.tag` to the same value as `metadata.version`.** `aa26-connector package` enforces this strictly; `aa26-connector lint` rule **R007** warns when the tag is floating (`dev` or `latest`). The bug class this prevents:
+
+1. Connector author releases v0.2.0; bundle ships an image tagged `:dev`. Cluster imports it, kubelet runs it under that tag — fine.
+2. Author makes changes, releases v0.2.1; bundle ships a new image also tagged `:dev`. Cluster registers a new `source_types` row for v0.2.1 — but if anything in the import chain misses (image not retagged, ctr cache not refreshed, etc.), kubelet's `pullPolicy: Never` lookup for `:dev` still resolves to the v0.2.0 image bytes.
+3. Pods spawned for v0.2.1 sources run v0.2.0 code. No error from kubelet (the tag resolves successfully), no warning anywhere. The "new" version's bug fixes are invisible.
+
+Pinning the tag to `metadata.version` makes this impossible: kubelet either finds the exact image for the version row it's launching, or fails loud with `ErrImageNeverPull`. The `source_types` row, the bundle's `image.tar`, and the running pod are forced into lockstep on every release.
+
+**Recommended pattern:**
+
+```yaml
+metadata:
+  name: snowflake
+  version: 1.2.0
+
+spec:
+  image:
+    repository: ghcr.io/netwrix/connectors/snowflake
+    tag: 1.2.0          # ← same as metadata.version above
+    pullPolicy: Never   # for in-cluster registry use
+```
+
+**Mechanical:** drive both fields from a single source of truth in your release pipeline. The Makefile pattern below derives `tag` from `metadata.version` so they can't drift:
+
+```makefile
+VERSION := $(shell grep '^  version:' connector.yaml | head -1 | awk '{print $$2}')
+IMG     := localhost/connector-framework/snowflake:$(VERSION)
+
+image:
+	sudo docker build -t $(IMG) .
+
+bundle: image
+	sudo docker save $(IMG) -o image.tar
+	tar -czf snowflake-$(VERSION).tar.gz connector.yaml image.tar README.md
+	rm -f image.tar
+```
+
+`aa26-connector package` rejects a manifest where `tag` and `version` disagree before running `docker save` — see [cli.md](cli.md#aa26-connector-package) for the exact failure message and remediation.
 
 ## `spec.capabilities`
 
@@ -284,6 +325,85 @@ When `type: oauth2`, these additional fields apply (full details in **[oauth2.md
 ### Cluster policy
 
 Operators can restrict which methods the wizard offers via the `allowed_connector_auth_methods` AppSetting (comma-separated list). The wizard filters its dropdown to that list, and the backend independently rejects POSTs that try to use a disallowed type.
+
+## `spec.sourceTypes`
+
+Declares the ingestion mapping for each kind of finding your connector emits — which ClickHouse table to write to and how to project finding fields onto that table's columns.
+
+```yaml
+sourceTypes:
+  - name: DropboxFile            # matches finding.sourceType
+    domain: Artifact             # required for entities target; omit for permissions
+    ingestion:
+      target: entities           # "entities" (default) or "permissions"
+      mapping:
+        name:           $.object.name
+        sourceSystemId: $.object.id
+        sizeBytes:      $.object.size
+        modifiedDate:   $.object.server_modified
+
+  - name: DropboxPermission      # distinct name — must not share with DropboxFile
+    ingestion:
+      target: permissions
+      mapping:
+        permissionGrantId: $.subject.id
+        aceType:           $.permissions.aceType
+        memberRole:        $.permissions.memberRole
+        readAllowed:       $.permissions.readAllowed
+        writeAllowed:      $.permissions.writeAllowed
+        deleteAllowed:     $.permissions.deleteAllowed
+        manageAllowed:     $.permissions.manageAllowed
+        adminAllowed:      $.permissions.adminAllowed
+        listAllowed:       $.permissions.listAllowed
+```
+
+### `ingestion.target`
+
+| Value | ClickHouse table | Finding type | Notes |
+|---|---|---|---|
+| `entities` (default) | `access_analyzer.entities` | `object_metadata` | File/table/object inventory. Requires `domain`. |
+| `permissions` | `access_analyzer.permissions` | `access_grant` | Permission grants. No `domain` needed. `targetEntityId` and `principalId` are derived by the runtime from `object.id` and `subject.canonicalEmail` — do not map them. |
+
+### `ingestion.mapping` — entities columns
+
+See `aa26-connector schema entities` for the full allow-list. Key columns:
+
+| Column | Notes |
+|---|---|
+| `name` | Display name in the UI. |
+| `sourceSystemId` | **Recommended.** Natural key from the source (file ID, URL, table FQN). Used to derive a stable `entityId` across re-scans. Omitting it causes a warn. |
+| `sizeBytes` | Object size in bytes. |
+| `modifiedDate` | ISO 8601 timestamp. |
+| `contentHash` | Content hash for change detection. |
+| `parentId` | For hierarchical entities (domain=Artifact only). |
+
+### `ingestion.mapping` — permissions columns
+
+| Column | Required | Notes |
+|---|---|---|
+| `permissionGrantId` | recommended | Stable ID for this (principal, object, permission) tuple. Omitting causes dedup instability (warn). |
+| `aceType` | recommended | `Allow` or `Deny`. |
+| `memberRole` | recommended | `Owner`, `Member`, or `Guest`. |
+| `readAllowed` | optional | Boolean. |
+| `writeAllowed` | optional | Boolean. |
+| `deleteAllowed` | optional | Boolean. |
+| `manageAllowed` | optional | Boolean. |
+| `adminAllowed` | optional | Boolean. |
+| `listAllowed` | optional | Boolean. |
+
+Runtime-injected columns (do not map these — the runtime derives them automatically):
+
+- `targetEntityId` — UUIDv5 of the object, derived from `object.id`
+- `principalId` — UUIDv5 of the principal, derived from `subject.canonicalEmail`
+- `connectorReference` — the source ID
+- `crawlTimestampUtc` — scan timestamp
+
+### sourceType naming rules
+
+- Each sourceType `name` must be globally unique within the manifest.
+- Names must be `PascalCase` and match the `sourceType` field on the finding (e.g. finding `"sourceType": "DropboxPermission"` must have a manifest entry named `DropboxPermission`).
+- **Never share a sourceType name between `object_metadata` and `access_grant` findings** — the runtime uses the name to look up the target table and column mapping; sharing it routes both finding types to a single table and drops or mis-stores one of them.
+- `aa26-connector lint` rule **R008** warns when `access_scan` is declared in capabilities but no sourceType has `ingestion.target: permissions`.
 
 ## `spec.permissions`
 

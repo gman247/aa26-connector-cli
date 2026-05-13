@@ -234,6 +234,111 @@ func defaultRules() []lintRule {
 			"Sidecar URL drift detected. The runtime listens on 127.0.0.1:8089. "+
 				"Other ports won't reach the harness or production.",
 		),
+
+		// R006: `sidecars:` placed at spec level instead of nested under
+		// spec.capabilities. The YAML parser accepts it, the connector
+		// uploads without error, but core-api's
+		// AdapterService#needs_extraction_sidecar? reads
+		// connector_framework.capabilities.sidecars only — so the
+		// extraction container never gets attached, EXTRACTION_URL is
+		// unset on the worker, and SDS findings on binary files emit
+		// with no `content` for the classifier to read.
+		ruleNearby(
+			"R006",
+			"error",
+			[]string{".yaml", ".yml"},
+			regexp.MustCompile(`^  sidecars:\s*\[`),
+			regexp.MustCompile(`^apiVersion:\s*connectors\.netwrix\.io`),
+			200,
+			"`sidecars:` is at spec level — it must nest under `spec.capabilities`. "+
+				"At spec level it's silently ignored; the extraction sidecar won't be attached and "+
+				"SDS findings on binary files will emit without `content`. See docs/extraction.md.",
+		),
+
+		// R008: connector declares access_scan but no sourceType with
+		// ingestion.target: permissions. access_grant findings emitted
+		// by an access_scan will be routed by the runtime to the
+		// permissions table — but if no sourceType declares that target,
+		// the runtime has no projection mapping and drops the findings.
+		// This is the v1.1 version of the bug that previously required
+		// the v1 ingestion guard.
+		{
+			id:       "R008",
+			severity: "warn",
+			exts:     []string{".yaml", ".yml"},
+			check: func(file string, lines []string) []LintFinding {
+				// Only check connector manifests.
+				isConnectorManifest := false
+				for _, l := range lines {
+					if regexp.MustCompile(`^apiVersion:\s*connectors\.netwrix\.io`).MatchString(l) {
+						isConnectorManifest = true
+						break
+					}
+				}
+				if !isConnectorManifest {
+					return nil
+				}
+				// Check for access_scan in scanTypes.
+				hasAccessScan := false
+				for _, l := range lines {
+					if regexp.MustCompile(`\baccess_scan\b`).MatchString(l) {
+						hasAccessScan = true
+						break
+					}
+				}
+				if !hasAccessScan {
+					return nil
+				}
+				// Check for at least one ingestion.target: permissions.
+				for _, l := range lines {
+					if regexp.MustCompile(`^\s+target:\s*permissions\s*$`).MatchString(l) {
+						return nil // found one — all good
+					}
+				}
+				return []LintFinding{{
+					File:     file,
+					Line:     1,
+					Rule:     "R008",
+					Severity: "warn",
+					Message: "connector declares access_scan but no sourceType has ingestion.target: permissions. " +
+						"access_grant findings will be dropped by the runtime — add a sourceType entry with " +
+						"ingestion.target: permissions and map permissionGrantId, aceType, memberRole, and the " +
+						"readAllowed/writeAllowed/deleteAllowed/manageAllowed fields. " +
+						"See docs/manifest-reference.md §spec.sourceTypes.",
+				}}
+			},
+		},
+
+		// R007: floating image tag (`:dev`, `:latest`) on a connector
+		// manifest. Symptoms when this bites: a new connector version
+		// uploads successfully, the source_types row registers, but
+		// pods spawned from it run a stale image because the floating
+		// tag still resolves to whichever blob was imported last.
+		// kubelet's pullPolicy: Never doesn't error — the tag resolves
+		// fine, just to the wrong bytes. The new version's bug fixes
+		// are invisible, with no warning at any layer.
+		// Real-world incident: dropbox-0.2.1 shipped with v0.2.0's
+		// compiled code on the dev cluster for one full scan cycle
+		// before anyone noticed. See docs/manifest-reference.md
+		// "Versioned image tags".
+		//
+		// Scope to connector manifests via the apiVersion anchor.
+		// Warns (not errors) because there are legitimate reasons to
+		// float — cluster operators who deliberately want
+		// "rebuild-and-restart picks up the latest image" — but the
+		// warning makes the choice explicit. `aa26-connector package`
+		// enforces strictly at package time regardless.
+		ruleNearby(
+			"R007",
+			"warn",
+			[]string{".yaml", ".yml"},
+			regexp.MustCompile(`^\s{4}tag:\s*(dev|latest)\s*$`),
+			regexp.MustCompile(`^apiVersion:\s*connectors\.netwrix\.io`),
+			200,
+			"`spec.image.tag` is a floating tag (`dev`/`latest`). "+
+				"Pin it to `metadata.version` so kubelet can't silently run a stale image when "+
+				"the connector version bumps. See docs/manifest-reference.md `Versioned image tags`.",
+		),
 	}
 }
 

@@ -146,6 +146,47 @@ $ aa26-connector package
 
 Validates the manifest first, runs `docker save` on the image declared in `spec.image`, and emits `<name>-<version>.tar.gz`. See [uploading.md](uploading.md) for the full flow.
 
+### Version invariant — enforced
+
+`package` refuses to bundle unless three identifiers agree:
+
+| Field | Required value |
+|---|---|
+| `metadata.version` | the connector's semver |
+| `spec.image.tag` | **same string** as `metadata.version` |
+| Output filename | `<metadata.name>-<metadata.version>.tar.gz` |
+
+If `spec.image.tag` is missing, set to `dev`/`latest`, or doesn't match `metadata.version`, the command fails with a clear remediation message before running `docker save`. The reason for the rule is non-obvious until it bites: kubelet's `pullPolicy: Never` resolves a floating tag like `:dev` to *whichever blob was imported last* into the cluster's containerd cache, not the image the new version was built from. The new version's source_type row registers correctly, but pods spawned from it run stale code, with no error from kubelet at any layer.
+
+The same logic applies to the bundle filename: the upload UI and the registry both display the version they parse from `<name>-<version>.tar.gz`. A custom `--out=mybuild.tar.gz` strips that version, so the on-disk file, the manifest, and the installed image can all disagree about which build is actually deployed. `package` rejects `--out` values that don't match the expected name.
+
+```bash
+# Concrete failure shape — copy-paste fixable
+$ aa26-connector package
+✗ spec.image.tag ("dev") must equal metadata.version ("0.5.0"). Floating
+  or version-mismatched tags silently install stale code (kubelet's
+  pullPolicy:Never resolves the tag to whichever blob was imported last,
+  not the image you just built). Update connector.yaml so both fields are
+  "0.5.0", then re-run `aa26-connector package`.
+```
+
+`aa26-connector lint` rule **R007** warns at lint time so authors don't have to wait for the package step to discover the mismatch.
+
+### Recommended Makefile pattern
+
+Drive both fields from a single source of truth — read `metadata.version` once and build the image tag from it — so a `make image && make package` after a version bump can't get out of sync:
+
+```makefile
+VERSION := $(shell grep '^  version:' connector.yaml | head -1 | awk '{print $$2}')
+IMG     := localhost/<name>:$(VERSION)
+
+image:
+	docker build -t $(IMG) .
+
+package: image
+	aa26-connector package connector.yaml
+```
+
 ### Extraction sidecar mock
 
 When your manifest declares `spec.capabilities.sidecars: [extraction]`, the test harness also spins up a **mock extraction sidecar** on a free local port and sets `EXTRACTION_URL` on your worker container. The mock is intentionally thin — it returns synthetic `EXTRACTED:<filename>` text for any non-image MIME so you can verify your code wires the call correctly without needing the real ~350 MB Tika image. Image MIMEs return 415 (no OCR is modeled). For real parser fidelity (PDF font handling, OCR, custom format quirks), test against a real cluster pod where Tika is actually executing. See [extraction.md](extraction.md#local-testing--aa26-connector-test) for the full flow.
