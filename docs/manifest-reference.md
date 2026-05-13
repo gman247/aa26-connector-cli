@@ -326,6 +326,85 @@ When `type: oauth2`, these additional fields apply (full details in **[oauth2.md
 
 Operators can restrict which methods the wizard offers via the `allowed_connector_auth_methods` AppSetting (comma-separated list). The wizard filters its dropdown to that list, and the backend independently rejects POSTs that try to use a disallowed type.
 
+## `spec.sourceTypes`
+
+Declares the ingestion mapping for each kind of finding your connector emits — which ClickHouse table to write to and how to project finding fields onto that table's columns.
+
+```yaml
+sourceTypes:
+  - name: DropboxFile            # matches finding.sourceType
+    domain: Artifact             # required for entities target; omit for permissions
+    ingestion:
+      target: entities           # "entities" (default) or "permissions"
+      mapping:
+        name:           $.object.name
+        sourceSystemId: $.object.id
+        sizeBytes:      $.object.size
+        modifiedDate:   $.object.server_modified
+
+  - name: DropboxPermission      # distinct name — must not share with DropboxFile
+    ingestion:
+      target: permissions
+      mapping:
+        permissionGrantId: $.subject.id
+        aceType:           $.permissions.aceType
+        memberRole:        $.permissions.memberRole
+        readAllowed:       $.permissions.readAllowed
+        writeAllowed:      $.permissions.writeAllowed
+        deleteAllowed:     $.permissions.deleteAllowed
+        manageAllowed:     $.permissions.manageAllowed
+        adminAllowed:      $.permissions.adminAllowed
+        listAllowed:       $.permissions.listAllowed
+```
+
+### `ingestion.target`
+
+| Value | ClickHouse table | Finding type | Notes |
+|---|---|---|---|
+| `entities` (default) | `access_analyzer.entities` | `object_metadata` | File/table/object inventory. Requires `domain`. |
+| `permissions` | `access_analyzer.permissions` | `access_grant` | Permission grants. No `domain` needed. `targetEntityId` and `principalId` are derived by the runtime from `object.id` and `subject.canonicalEmail` — do not map them. |
+
+### `ingestion.mapping` — entities columns
+
+See `aa26-connector schema entities` for the full allow-list. Key columns:
+
+| Column | Notes |
+|---|---|
+| `name` | Display name in the UI. |
+| `sourceSystemId` | **Recommended.** Natural key from the source (file ID, URL, table FQN). Used to derive a stable `entityId` across re-scans. Omitting it causes a warn. |
+| `sizeBytes` | Object size in bytes. |
+| `modifiedDate` | ISO 8601 timestamp. |
+| `contentHash` | Content hash for change detection. |
+| `parentId` | For hierarchical entities (domain=Artifact only). |
+
+### `ingestion.mapping` — permissions columns
+
+| Column | Required | Notes |
+|---|---|---|
+| `permissionGrantId` | recommended | Stable ID for this (principal, object, permission) tuple. Omitting causes dedup instability (warn). |
+| `aceType` | recommended | `Allow` or `Deny`. |
+| `memberRole` | recommended | `Owner`, `Member`, or `Guest`. |
+| `readAllowed` | optional | Boolean. |
+| `writeAllowed` | optional | Boolean. |
+| `deleteAllowed` | optional | Boolean. |
+| `manageAllowed` | optional | Boolean. |
+| `adminAllowed` | optional | Boolean. |
+| `listAllowed` | optional | Boolean. |
+
+Runtime-injected columns (do not map these — the runtime derives them automatically):
+
+- `targetEntityId` — UUIDv5 of the object, derived from `object.id`
+- `principalId` — UUIDv5 of the principal, derived from `subject.canonicalEmail`
+- `connectorReference` — the source ID
+- `crawlTimestampUtc` — scan timestamp
+
+### sourceType naming rules
+
+- Each sourceType `name` must be globally unique within the manifest.
+- Names must be `PascalCase` and match the `sourceType` field on the finding (e.g. finding `"sourceType": "DropboxPermission"` must have a manifest entry named `DropboxPermission`).
+- **Never share a sourceType name between `object_metadata` and `access_grant` findings** — the runtime uses the name to look up the target table and column mapping; sharing it routes both finding types to a single table and drops or mis-stores one of them.
+- `aa26-connector lint` rule **R008** warns when `access_scan` is declared in capabilities but no sourceType has `ingestion.target: permissions`.
+
 ## `spec.permissions`
 
 What your connector is allowed to emit. The sidecar enforces this at admission time.

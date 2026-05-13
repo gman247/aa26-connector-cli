@@ -22,7 +22,7 @@ Every event has these fields:
 
 ### `access_grant` — "this principal has this permission on this object"
 
-The bread-and-butter for access scans.
+The bread-and-butter for access scans. These findings are routed by the runtime to the `permissions` ClickHouse table (not `entities`). Your connector manifest must declare a sourceType with `ingestion.target: permissions` to provide the column mapping — see [manifest-reference.md §spec.sourceTypes](manifest-reference.md#specSourceTypes).
 
 ```json
 {
@@ -31,36 +31,41 @@ The bread-and-butter for access scans.
   "executionId": "0e7c3a98-...",
   "occurredAt": "2026-05-05T20:00:00Z",
   "type": "access_grant",
+  "sourceType": "DropboxPermission",
   "subject": {
-    "kind": "principal",
-    "id": "user:alice@corp.com",
-    "displayName": "Alice Anderson"
+    "kind": "user",
+    "id": "dropbox:user:dbid:abc123",
+    "displayName": "Alice Anderson",
+    "canonicalEmail": "alice@corp.com"
   },
   "object": {
-    "kind": "table",
-    "id": "snowflake://DEMO.PUBLIC.CUSTOMERS",
-    "displayName": "DEMO.PUBLIC.CUSTOMERS",
-    "url": "https://abc.snowflakecomputing.com/console#/data/databases/DEMO/schemas/PUBLIC/table/CUSTOMERS"
+    "kind": "file",
+    "id": "id:abc123def456"
   },
-  "predicate": {
-    "permission": "select",
-    "inherited": true,
-    "via": "role:DEMO_READER"
-  },
-  "evidence": {
-    "raw": {
-      "grantee": "DEMO_READER",
-      "grant_type": "ROLE",
-      "with_grant_option": false
-    }
-  },
-  "labels": {
-    "sensitivity": "internal"
+  "permissions": {
+    "aceType": "Allow",
+    "memberRole": "Member",
+    "readAllowed": true,
+    "writeAllowed": true,
+    "deleteAllowed": true,
+    "manageAllowed": false,
+    "adminAllowed": false,
+    "listAllowed": true
   }
 }
 ```
 
-Subject `kind` values you'll commonly use: `principal`, `group`, `service_account`, `role`. Object `kind` is whatever makes sense for your data store: `file`, `folder`, `table`, `view`, `bucket`, `mailbox`, `message`, `site`, `row`. Use IDs that are stable within the source — they're how the UI groups and links findings.
+**Key fields for access_grant:**
+
+| Field | Required | Notes |
+|---|---|---|
+| `subject.canonicalEmail` | ✅ | The runtime derives `principalId` (a stable UUIDv5) from this field. Without it, the permissions row can't be linked to identities. Use the user's login email; for groups without an email address use a stable synthetic ID like `dropbox:group:<group-id>`. |
+| `subject.id` | ✅ | Source-system stable ID. Becomes `permissionGrantId` when mapped. Must be unique per (file, principal) pair. |
+| `object.id` | ✅ | The runtime derives `targetEntityId` (UUIDv5) from this field to link the permission row to the entity in the `entities` table. Must match the `object.id` used in the corresponding `object_metadata` finding. |
+| `permissions.*` | recommended | Boolean permission flags (`readAllowed`, `writeAllowed`, `deleteAllowed`, `manageAllowed`, `adminAllowed`, `listAllowed`) plus `aceType` (`Allow`/`Deny`) and `memberRole` (`Owner`/`Member`/`Guest`). Map these via the sourceType's `ingestion.mapping`. |
+| `sourceType` | ✅ (if manifest has multiple sourceTypes) | Must match the name of a sourceType in your manifest that has `ingestion.target: permissions`. Use a distinct name from your object_metadata sourceType — sharing a name causes the runtime to route both finding types through the same mapping and clobber entity rows. |
+
+Subject `kind` values you'll commonly use: `user`, `group`, `service_account`. Object `kind` is whatever the object is in your source: `file`, `folder`, `table`, `site`. Use IDs that are stable within the source.
 
 ### `object_metadata` — "this object exists"
 
@@ -186,3 +191,6 @@ Drives the progress bar in the Scan Executions tab. Emit periodically — every 
 - **Using free-form `type` strings without the `custom:` prefix**: rejected. Built-in types are an enum; custom types must namespace.
 - **Sending one giant POST instead of streaming**: NDJSON is for streaming. Send one finding per line, flush in batches of 50–500. The sidecar handles backpressure.
 - **Setting your own `executionId`**: don't. Read it from `/v1/invocation`. The sidecar tags everything; if your `executionId` doesn't match the invocation, the sidecar trusts the invocation and your finding ends up in the wrong scan.
+- **Omitting `subject.canonicalEmail` on access_grant findings**: the runtime derives `principalId` from this field using UUIDv5. Without it the permission row lands with a null principal and can't be linked to an identity in the UI. Always include the user's login email.
+- **Sharing a `sourceType` name between `object_metadata` and `access_grant`**: the runtime uses the sourceType name to look up the ingestion mapping. If both finding types use the same name, the runtime routes them through the same mapping (targeting either `entities` or `permissions`, not both) and one set of findings is dropped or mis-stored.
+- **Declaring `access_scan` in capabilities but no `ingestion.target: permissions` sourceType**: access_grant findings will be dropped by the runtime with "unsupported finding type" until a permissions-targeted sourceType is declared. `aa26-connector lint` rule **R008** catches this.

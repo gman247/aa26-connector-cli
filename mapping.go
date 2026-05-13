@@ -56,6 +56,22 @@ var validDomains = map[string]bool{
 // hierarchicalDomains allows parentId.
 var hierarchicalDomains = map[string]bool{"Artifact": true}
 
+// permissionsAllowSet is the column allow-list for ingestion.target=permissions.
+// These are the connector-mappable columns in the access_analyzer.permissions table.
+// Runtime-derived columns (targetEntityId, principalId, connectorReference,
+// crawlTimestampUtc) are injected by the runtime and must not appear in the mapping.
+var permissionsAllowSet = map[string]bool{
+	"permissionGrantId": true,
+	"readAllowed":       true,
+	"writeAllowed":      true,
+	"deleteAllowed":     true,
+	"manageAllowed":     true,
+	"adminAllowed":      true,
+	"listAllowed":       true,
+	"aceType":           true,
+	"memberRole":        true,
+}
+
 var (
 	jsonPathRE    = regexp.MustCompile(`^\$(\.[a-zA-Z_][a-zA-Z0-9_]*)+$`)
 	addlPropKeyRE = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]*$`)
@@ -65,8 +81,9 @@ var (
 type ParsedSourceType struct {
 	Name                 string
 	Domain               string
-	Mapping              map[string][]string // entities column → path segments
-	AdditionalProperties map[string][]string // namespaced key → path segments
+	IngestionTarget      string              // "entities" (default) or "permissions"
+	Mapping              map[string][]string // table column → path segments
+	AdditionalProperties map[string][]string // namespaced key → path segments (entities only)
 }
 
 // ParseSourceTypes extracts and pre-parses spec.sourceTypes[] from a manifest map.
@@ -98,6 +115,14 @@ func ParseSourceTypes(manifest map[string]any) ([]ParsedSourceType, error) {
 		st.Domain, _ = obj["domain"].(string)
 
 		ingestion, _ := obj["ingestion"].(map[string]any)
+		if ingestion != nil {
+			if t, _ := ingestion["target"].(string); t != "" {
+				st.IngestionTarget = t
+			}
+		}
+		if st.IngestionTarget == "" {
+			st.IngestionTarget = "entities"
+		}
 		if ingestion != nil {
 			if mapping, _ := ingestion["mapping"].(map[string]any); mapping != nil {
 				for col, expr := range mapping {
@@ -243,11 +268,8 @@ func ValidateMappingRules(manifest map[string]any, connectorName string) (errs, 
 		}
 		seenNames[name] = true
 
-		// Rule 4
+		// Rule 4: domain required for entities; not meaningful for permissions
 		domain, _ := obj["domain"].(string)
-		if !validDomains[domain] {
-			errs = append(errs, fmt.Sprintf("%s: unknown domain %q (must be one of Artifact, Computer, Group, Principal, Role, SystemObject)", pre, domain))
-		}
 
 		ingestion, _ := obj["ingestion"].(map[string]any)
 		if ingestion == nil {
@@ -255,24 +277,41 @@ func ValidateMappingRules(manifest map[string]any, connectorName string) (errs, 
 			continue
 		}
 
-		// Rule 5
+		// Rule 5: target must be "entities" or "permissions"
 		target, _ := ingestion["target"].(string)
-		if target != "entities" {
-			errs = append(errs, fmt.Sprintf("%s: ingestion.target must be \"entities\" (got %q)", pre, target))
+		if target == "" {
+			target = "entities"
+		}
+		if target != "entities" && target != "permissions" {
+			errs = append(errs, fmt.Sprintf("%s: ingestion.target must be \"entities\" or \"permissions\" (got %q)", pre, target))
+		}
+
+		if target == "entities" && !validDomains[domain] {
+			errs = append(errs, fmt.Sprintf("%s: unknown domain %q (must be one of Artifact, Computer, Group, Principal, Role, SystemObject)", pre, domain))
 		}
 
 		mapping, _ := ingestion["mapping"].(map[string]any)
 		addlProps, _ := ingestion["additionalProperties"].(map[string]any)
 		hasSourceSystemId := false
+		hasPermissionGrantId := false
 
 		for col, expr := range mapping {
 			exprStr, _ := expr.(string)
-			// Rule 6
-			if !entitiesAllowSet[col] {
-				errs = append(errs, fmt.Sprintf("%s: mapping column %q is not in the entities allow-list", pre, col))
-			}
-			if col == "sourceSystemId" {
-				hasSourceSystemId = true
+			// Rule 6: validate column against the correct allow-list for the target table
+			if target == "permissions" {
+				if !permissionsAllowSet[col] {
+					errs = append(errs, fmt.Sprintf("%s: mapping column %q is not in the permissions allow-list (allowed: permissionGrantId, aceType, memberRole, readAllowed, writeAllowed, deleteAllowed, manageAllowed, adminAllowed, listAllowed)", pre, col))
+				}
+				if col == "permissionGrantId" {
+					hasPermissionGrantId = true
+				}
+			} else {
+				if !entitiesAllowSet[col] {
+					errs = append(errs, fmt.Sprintf("%s: mapping column %q is not in the entities allow-list", pre, col))
+				}
+				if col == "sourceSystemId" {
+					hasSourceSystemId = true
+				}
 			}
 			// Rule 9
 			if !jsonPathRE.MatchString(exprStr) {
@@ -284,25 +323,33 @@ func ValidateMappingRules(manifest map[string]any, connectorName string) (errs, 
 			}
 		}
 
-		// Rule 10
-		if !hasSourceSystemId {
+		// Rule 10: stable-ID warnings, table-specific
+		if target == "entities" && !hasSourceSystemId {
 			warns = append(warns, fmt.Sprintf("%s: mapping omits sourceSystemId — entityId will not be stable across re-scans", pre))
 		}
+		if target == "permissions" && !hasPermissionGrantId {
+			warns = append(warns, fmt.Sprintf("%s: mapping omits permissionGrantId — ReplacingMergeTree dedup key will be unstable across re-scans", pre))
+		}
 
-		// Rule 8 + Rule 9 on additionalProperties
-		ns := connectorName + "."
-		for key, expr := range addlProps {
-			exprStr, _ := expr.(string)
-			if !strings.HasPrefix(key, ns) {
-				errs = append(errs, fmt.Sprintf("%s: additionalProperties key %q must be namespaced under %q", pre, key, ns))
-			} else {
-				suffix := key[len(ns):]
-				if !addlPropKeyRE.MatchString(suffix) {
-					errs = append(errs, fmt.Sprintf("%s: additionalProperties key %q has invalid suffix %q (must match [a-zA-Z][a-zA-Z0-9_]*)", pre, key, suffix))
+		// Rule 8 + Rule 9 on additionalProperties (entities target only)
+		if target == "permissions" && len(addlProps) > 0 {
+			warns = append(warns, fmt.Sprintf("%s: additionalProperties is not supported for ingestion.target=permissions and will be ignored", pre))
+		}
+		if target == "entities" {
+			ns := connectorName + "."
+			for key, expr := range addlProps {
+				exprStr, _ := expr.(string)
+				if !strings.HasPrefix(key, ns) {
+					errs = append(errs, fmt.Sprintf("%s: additionalProperties key %q must be namespaced under %q", pre, key, ns))
+				} else {
+					suffix := key[len(ns):]
+					if !addlPropKeyRE.MatchString(suffix) {
+						errs = append(errs, fmt.Sprintf("%s: additionalProperties key %q has invalid suffix %q (must match [a-zA-Z][a-zA-Z0-9_]*)", pre, key, suffix))
+					}
 				}
-			}
-			if !jsonPathRE.MatchString(exprStr) {
-				errs = append(errs, fmt.Sprintf("%s: additionalProperties[%q]: invalid path expression %q", pre, key, exprStr))
+				if !jsonPathRE.MatchString(exprStr) {
+					errs = append(errs, fmt.Sprintf("%s: additionalProperties[%q]: invalid path expression %q", pre, key, exprStr))
+				}
 			}
 		}
 

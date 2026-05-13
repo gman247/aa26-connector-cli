@@ -255,6 +255,60 @@ func defaultRules() []lintRule {
 				"SDS findings on binary files will emit without `content`. See docs/extraction.md.",
 		),
 
+		// R008: connector declares access_scan but no sourceType with
+		// ingestion.target: permissions. access_grant findings emitted
+		// by an access_scan will be routed by the runtime to the
+		// permissions table — but if no sourceType declares that target,
+		// the runtime has no projection mapping and drops the findings.
+		// This is the v1.1 version of the bug that previously required
+		// the v1 ingestion guard.
+		{
+			id:       "R008",
+			severity: "warn",
+			exts:     []string{".yaml", ".yml"},
+			check: func(file string, lines []string) []LintFinding {
+				// Only check connector manifests.
+				isConnectorManifest := false
+				for _, l := range lines {
+					if regexp.MustCompile(`^apiVersion:\s*connectors\.netwrix\.io`).MatchString(l) {
+						isConnectorManifest = true
+						break
+					}
+				}
+				if !isConnectorManifest {
+					return nil
+				}
+				// Check for access_scan in scanTypes.
+				hasAccessScan := false
+				for _, l := range lines {
+					if regexp.MustCompile(`\baccess_scan\b`).MatchString(l) {
+						hasAccessScan = true
+						break
+					}
+				}
+				if !hasAccessScan {
+					return nil
+				}
+				// Check for at least one ingestion.target: permissions.
+				for _, l := range lines {
+					if regexp.MustCompile(`^\s+target:\s*permissions\s*$`).MatchString(l) {
+						return nil // found one — all good
+					}
+				}
+				return []LintFinding{{
+					File:     file,
+					Line:     1,
+					Rule:     "R008",
+					Severity: "warn",
+					Message: "connector declares access_scan but no sourceType has ingestion.target: permissions. " +
+						"access_grant findings will be dropped by the runtime — add a sourceType entry with " +
+						"ingestion.target: permissions and map permissionGrantId, aceType, memberRole, and the " +
+						"readAllowed/writeAllowed/deleteAllowed/manageAllowed fields. " +
+						"See docs/manifest-reference.md §spec.sourceTypes.",
+				}}
+			},
+		},
+
 		// R007: floating image tag (`:dev`, `:latest`) on a connector
 		// manifest. Symptoms when this bites: a new connector version
 		// uploads successfully, the source_types row registers, but
