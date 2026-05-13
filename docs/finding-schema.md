@@ -184,6 +184,46 @@ Drives the progress bar in the Scan Executions tab. Emit periodically — every 
 
 `level` ∈ `debug | info | warn | error`. `attributes` is freeform string→anything; UI surfaces it as filter facets.
 
+## Permission principals lookup table
+
+When the runtime sidecar processes an `access_grant` finding it writes two rows simultaneously:
+
+1. **`permissions`** — one row per (file, principal, permission) triple
+2. **`permission_principals`** — one row per unique principal, keyed by `principalId`
+
+`permission_principals` stores `canonicalEmail` and `displayName` exactly once, regardless of how many files that principal has access to. Join it against `permissions` to resolve identity without repeating the email on every permission row:
+
+```sql
+SELECT
+    p.targetEntityId,
+    e.name              AS file_name,
+    e.pathSegment       AS file_path,
+    pp.canonicalEmail,
+    pp.displayName,
+    p.aceType,
+    p.memberRole,
+    p.readAllowed,
+    p.writeAllowed,
+    p.deleteAllowed,
+    p.manageAllowed
+FROM access_analyzer.permissions AS p
+LEFT JOIN access_analyzer.entities AS e
+    ON e.entityId = p.targetEntityId
+LEFT JOIN access_analyzer.permission_principals AS pp
+    ON pp.principalId = p.principalId
+ORDER BY p.crawlTimestampUtc DESC
+LIMIT 100
+```
+
+`permission_principals` schema:
+
+| Column | Type | Notes |
+|---|---|---|
+| `principalId` | UUID | UUIDv5(framework-namespace, canonicalEmail). Stable across all connectors — the same email always maps to the same UUID. Primary key. |
+| `canonicalEmail` | String | The login email used to derive `principalId`. For synthetic identities (e.g. "anyone with link"), a stable namespaced string like `google-workspace:anyone:with-link`. |
+| `displayName` | String | Human-readable name from the source system at scan time. May vary across scans. |
+| `crawlTimestampUtc` | DateTime64(6) | ReplacingMergeTree version column — latest scan wins on dedup. |
+
 ## Common mistakes
 
 - **Forgetting `schemaVersion`**: it's required. The sidecar 400s.
