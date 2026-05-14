@@ -228,21 +228,11 @@ scan:
         type: array
         items:
           type: string
-          enum:
-            - active_credential
-            - payment_data
-            - regulated_identifier
-            - employee_record
-            - internal_directory
-            - contact_list
-            - personal_contact_info
-            - compensation_data
-            - health_information
-            - legal_contract
         x-display: "Evidence AI recipes to run (empty = all)"
         description: |
           Restrict Evidence AI to specific sensitivity recipes for this scan.
-          Leave empty to run all enabled recipes (default behavior).
+          Leave empty (or omit) to run all enabled recipes — that is the
+          default. See the recipe reference table below for available values.
       detectors:
         type: array
         items:
