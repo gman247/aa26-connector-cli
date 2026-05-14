@@ -228,21 +228,11 @@ scan:
         type: array
         items:
           type: string
-          enum:
-            - active_credential
-            - payment_data
-            - regulated_identifier
-            - employee_record
-            - internal_directory
-            - contact_list
-            - personal_contact_info
-            - compensation_data
-            - health_information
-            - legal_contract
         x-display: "Evidence AI recipes to run (empty = all)"
         description: |
           Restrict Evidence AI to specific sensitivity recipes for this scan.
-          Leave empty to run all enabled recipes (default behavior).
+          Leave empty (or omit) to run all enabled recipes — that is the
+          default. See the recipe reference table below for available values.
       detectors:
         type: array
         items:
@@ -265,22 +255,7 @@ When the runtime sidecar starts a sensitive-data scan it fires a one-time `POST 
 
 ### Available recipes
 
-| Recipe | Detects | Severity |
-|---|---|---|
-| `active_credential` | API keys, secrets, private keys | Critical |
-| `payment_data` | Credit cards, bank accounts, IBAN, SWIFT | Critical / High |
-| `regulated_identifier` | SSN, passport, driver's licence, national IDs | High |
-| `employee_record` | HR files — PII + salary / payroll | High |
-| `internal_directory` | Staff lists with name + email + phone | Medium |
-| `contact_list` | Customer / prospect contact lists | Medium |
-| `personal_contact_info` | Standalone PII (email, phone, DOB) | Medium / Low |
-| `compensation_data` | Salary data, compensation bands | High |
-| `health_information` | PHI — medical codes, clinical notes | Critical / High |
-| `legal_contract` | Contracts, NDAs, legal agreements (LLM) | High |
-
-!!! note "`legal_contract` requires an LLM client"
-    Without an LLM configured on the Evidence AI side this recipe is silently
-    skipped regardless of `recipe_filter`.
+Refer to the Evidence AI documentation for a list of available recipes.
 
 ## `spec.resources`
 
