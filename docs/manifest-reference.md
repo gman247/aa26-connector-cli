@@ -2,6 +2,14 @@
 
 The manifest is the contract. Every connector ships one. The framework parses it, validates it against [the JSON Schema](https://connectors.netwrix.io/schema/connector.schema.json), and uses the result to drive the UI form, image discovery, capability gating, and (eventually) signature verification.
 
+> **Implementation status:** Fields and features in this reference use the following tags:
+> - `[implemented]` — works end-to-end on the current cluster
+> - `[stored, not applied]` — accepted at upload and stored in the database, but the framework does not yet act on the value
+> - `[stub]` — backend code exists but the UI or enforcement layer is incomplete
+> - `[planned]` — reserved in the schema for a future release; no backend implementation exists yet
+>
+> Untagged fields are fully implemented.
+
 Validate yours at any time:
 
 ```bash
@@ -37,14 +45,14 @@ spec:
 
 ## `metadata`
 
-| field | required | notes |
-|---|---|---|
-| `name` | ✅ | Globally unique slug. Pattern: `^[a-z][a-z0-9-]{1,62}[a-z0-9]$`. Becomes `source_types.name`. |
-| `displayName` | ✅ | What humans see in the connector picker. Up to 64 chars. |
-| `version` | ✅ | Semver (e.g. `1.2.0`, `2.0.0-rc.1`). The runtime uses this to bind to image tags. |
-| `vendor` | optional | `netwrix` for first-party, `community` for marketplace contributions, `local` for in-house, or your org name. Drives the trust tier. Default: `local`. |
-| `icon` | optional | Path (relative to the manifest) to an SVG/PNG. Shown in the picker. |
-| `description` | optional | Markdown blurb shown when an admin clicks into the connector. |
+| field | required | status | notes |
+|---|---|---|---|
+| `name` | ✅ | [implemented] | Globally unique slug. Pattern: `^[a-z][a-z0-9-]{1,62}[a-z0-9]$`. Becomes `source_types.name`. |
+| `displayName` | ✅ | [implemented] | What humans see in the connector picker. Up to 64 chars. |
+| `version` | ✅ | [implemented] | Semver (e.g. `1.2.0`, `2.0.0-rc.1`). The runtime uses this to bind to image tags. |
+| `vendor` | optional | [stored, not applied] | `netwrix` for first-party, `community` for marketplace contributions, `local` for in-house, or your org name. Stored in the database; trust-tier display and filtering are not yet implemented. |
+| `icon` | optional | [stored, not applied] | Path (relative to the manifest) to an SVG/PNG. Accepted and stored, but the UI picker does not yet display it. |
+| `description` | optional | [stored, not applied] | Markdown blurb intended for the connector detail view. Stored in the database; no UI renders it yet. |
 
 ## `spec.image`
 
@@ -60,7 +68,15 @@ image:
       certificateOidcIssuer: https://token.actions.githubusercontent.com
 ```
 
-The framework launches your container as `repository@digest` if `digest` is set, or `repository:tag` otherwise. **In production, set both digest and signing**; the framework rejects unsigned community connectors unless the cluster operator explicitly allows them.
+| field | status | notes |
+|---|---|---|
+| `repository` | [implemented] | Full image path, e.g. `ghcr.io/netwrix/connectors/snowflake`. |
+| `tag` | [implemented] | Must match `metadata.version`. Enforced by `aa26-connector package`. |
+| `digest` | [stored, not applied] | Accepted at upload and stored; pod dispatch always uses `repository:tag`, never `repository@digest`. Digest pinning is planned for Phase 3 (cosign). |
+| `pullPolicy` | [stored, not applied] | Accepted and stored; the cluster always uses `IfNotPresent` regardless of the declared value. |
+| `signing.cosign` | [planned] | Schema reserved for signature verification. No verification pipeline exists yet. |
+
+The framework currently launches your container as `repository:tag`. **`digest` and `signing` are stored but not yet enforced** — see status tags above.
 
 ### Versioned image tags (required at package time)
 
@@ -120,13 +136,13 @@ capabilities:
 
 **Operations** (verbs your container dispatches at runtime, picked from the invocation):
 
-| operation | when called | required? |
+| operation | status | when called |
 |---|---|---|
-| `test_connection` | User clicks "Test connection" on Service Account or Source | conventionally always present |
-| `discover` | Discovery scan to enumerate available data | optional |
-| `scan` | The actual work — `scan.scanType` says `access_scan` vs `sensitive_data_scan` vs `sync` | required if any `scanTypes` listed |
-| `fetch` | UI drilldown wants the contents of one object | optional |
-| `apply` | Write back, e.g. apply a sensitivity label | optional |
+| `test_connection` | [implemented] | User clicks "Test connection" on Service Account or Source |
+| `scan` | [implemented] | The actual work — `scan.scanType` says `access_scan` vs `sensitive_data_scan` |
+| `discover` | [stored, not applied] | Stored in capabilities; no UI button or dispatch path exists yet |
+| `fetch` | [stored, not applied] | Stored in capabilities; no UI button or dispatch path exists yet |
+| `apply` | [stored, not applied] | Stored in capabilities; no UI button or dispatch path exists yet |
 
 **Scan types** must be a subset of `[access_scan, sensitive_data_scan, sync]`. If you list `access_scan`, you're promising your `scan` op handles `scanType=access_scan` invocations.
 
@@ -209,9 +225,9 @@ source:
 
 Same `x-` extensions as `credentials`. Any valid JSON Schema is allowed — `enum` for dropdowns, `type: array` for lists, conditional fields, the works.
 
-## `spec.scan`
+## `spec.scan` [stored, not applied]
 
-Per-execution overrides — the form shown when a user clicks **Run scan now** with custom parameters. Skip if your scans don't need user-tunable knobs.
+Per-execution overrides — the form that would be shown when a user clicks **Run scan now** with custom parameters. The schema is stored in the database but the "Run scan now" UI does not yet surface these fields. Declare them for forward-compatibility; they will be wired once the UI gains a per-execution parameter panel.
 
 ```yaml
 scan:
@@ -257,9 +273,9 @@ When the runtime sidecar starts a sensitive-data scan it fires a one-time `POST 
 
 Refer to the Evidence AI documentation for a list of available recipes.
 
-## `spec.resources`
+## `spec.resources` [stored, not applied]
 
-Standard k8s resources block applied to your container.
+Standard k8s resources block. Accepted at upload and stored, but the cluster does not yet apply it — the connector-api uses deployment-level resource defaults for all connector pods regardless of what is declared here. Declare them for forward-compatibility.
 
 ```yaml
 resources:
@@ -294,7 +310,11 @@ runtime:
       - "*.snowflakecomputing.com"
 ```
 
-`network.egress` is advisory — the framework can derive a NetworkPolicy from it to harden the connector pod's egress. Wildcards allowed.
+| field | status | notes |
+|---|---|---|
+| `type` | [stored, not applied] | Only `container` is meaningful; stored but no branching logic reads it. |
+| `timeoutSeconds` | [stored, not applied] | Stored; the cluster applies a deployment-level job TTL, not the connector's declared timeout. |
+| `network.egress` | [stored, not applied] | Stored; no NetworkPolicy is generated from this list yet. Wildcards are valid syntax for when generation is implemented. |
 
 ## `spec.auth`
 
@@ -332,39 +352,42 @@ auth:
 
 ### Method types
 
-| `type` | Behavior |
-|---|---|
-| `none` | Connector takes no credentials. Wizard skips the Credentials section entirely if this is the only method declared. |
-| `basic` / `bearer` / `api_key` | Inline credentials. The wizard renders the method's `fields` JSON Schema; values land in a per-source k8s Secret created by `ConnectorAuthHandler`. |
-| `service_account` | Reuses AA26's existing Service Account picker. `accountTypes` (optional) restricts the picker to specific SA flavors. |
-| `oauth2` | The framework's OAuth2 engine. Declares the provider's authorize/token URLs, scopes, and optional knobs; the framework handles redirect, callback, storage, refresh, and runtime token delivery. Your connector reads the current token from `GET /v1/credentials`. See **[oauth2.md](oauth2.md)** for the full guide. |
-| `custom` | Same as inline but for connector-specific shapes that don't fit basic/bearer/api_key. Fields are arbitrary; what gets stored is opaque to the framework. |
+| `type` | status | Behavior |
+|---|---|---|
+| `none` | [implemented] | Connector takes no credentials. Wizard skips the Credentials section entirely if this is the only method declared. |
+| `bearer` | [implemented] | Inline token. The wizard renders a token field; the value is stored in a per-source k8s Secret and injected into the pod. |
+| `basic` | [implemented] | Username + password. Stored as separate k8s Secrets and injected into the pod. |
+| `api_key` | [implemented] | API key. Stored as a k8s Secret and injected into the pod. |
+| `oauth2` | [implemented] | The framework's OAuth2 engine. Handles redirect, callback, storage, refresh, and runtime token delivery. See **[oauth2.md](oauth2.md)**. |
+| `service_account` | [stub] | Backend wired — existing SAs can be linked. The wizard UI currently shows an informational banner ("coming soon") in place of an SA picker. Full picker planned for v2. |
+| `custom` | [implemented] | Same as inline but for connector-specific shapes that don't fit the named types above. Fields are arbitrary. |
+| `customAuthAdapter` | [planned] | Escape hatch for providers that cannot be modeled declaratively. Not implemented. |
 
 ### OAuth2 fields
 
 When `type: oauth2`, these additional fields apply (full details in **[oauth2.md](oauth2.md)**):
 
-| Field | Required | Description |
-|---|---|---|
-| `provider` | yes | Short name (e.g. `dropbox`, `google`, `microsoft`, `salesforce`). Maps to deployment env vars `<PROVIDER>_OAUTH_CLIENT_ID/_SECRET` and to the callback URL path. |
-| `authorizationUrl` | yes\* | Provider's authorize endpoint. May contain `{field}` placeholders. |
-| `tokenUrl` | yes\* | Provider's token endpoint. May contain `{field}` placeholders. |
-| `scopes` | yes\* | Array of scope strings requested at consent. |
-| `pkce` | no | `true` (default) / `false`. Use `true` unless the provider genuinely doesn't support PKCE. |
-| `revocationUrl` | no | RFC 7009 revoke endpoint, called best-effort on source delete. |
-| `extraAuthParams` | no | Map of provider-specific query params appended to the authorize URL (e.g. `token_access_type: offline` for Dropbox). |
-| `extraTokenFields` | no | Array of non-standard token-response fields to persist + inject (e.g. `instance_url` for Salesforce). |
-| `urlParams` | no | Pre-auth user-input substitutions for tenant-scoped URLs (M365 `tenantId`). |
-| `customAuthAdapter` | no | Escape hatch: `host:port` your connector image exposes to handle authorize/exchange/refresh for providers the declarative engine can't model. Mutually exclusive with `authorizationUrl`/`tokenUrl`/`scopes`. |
+| Field | Required | status | Description |
+|---|---|---|---|
+| `provider` | yes | [implemented] | Short name (e.g. `dropbox`, `google`). Maps to deployment env vars `<PROVIDER>_OAUTH_CLIENT_ID/_SECRET` and to the callback URL path. |
+| `authorizationUrl` | yes\* | [implemented] | Provider's authorize endpoint. May contain `{field}` placeholders. |
+| `tokenUrl` | yes\* | [implemented] | Provider's token endpoint. May contain `{field}` placeholders. |
+| `scopes` | yes\* | [implemented] | Array of scope strings requested at consent. |
+| `pkce` | no | [implemented] | `true` (default) / `false`. Use `true` unless the provider genuinely doesn't support PKCE. |
+| `revocationUrl` | no | [stored, not applied] | RFC 7009 revoke endpoint. Stored; not yet called on source deletion. |
+| `extraAuthParams` | no | [implemented] | Provider-specific query params appended to the authorize URL (e.g. `token_access_type: offline` for Dropbox). |
+| `extraTokenFields` | no | [implemented] | Non-standard token-response fields to persist + inject. |
+| `urlParams` | no | [implemented] | Pre-auth user-input substitutions for tenant-scoped URLs (M365 `tenantId`). |
+| `customAuthAdapter` | no | [planned] | Escape hatch for providers that cannot be modeled declaratively. Not implemented. |
 
 \* Required unless `customAuthAdapter` is set.
 
 ### `scope`
 
-| Value | Meaning |
-|---|---|
-| `per-source` (default) | Each Source in the group gets its own credentials. Right for SaaS apps with per-instance tokens (Databricks PAT, Box token). |
-| `per-group` | One credential bundle covers every Source in the group. Right for AD bind credentials, file-server CIFS credentials. |
+| Value | status | Meaning |
+|---|---|---|
+| `per-source` (default) | [implemented] | Each Source in the group gets its own credentials. Right for SaaS apps with per-instance tokens. |
+| `per-group` | [stored, not applied] | Stored in the database; the wizard does not yet offer a single shared credential prompt for the group. The value is available for when the UI is wired. |
 
 ### Cluster policy
 
@@ -451,7 +474,7 @@ Runtime-injected columns (do not map these — the runtime derives them automati
 
 ## `spec.permissions`
 
-What your connector is allowed to emit. The sidecar enforces this at admission time.
+What your connector is allowed to emit. The sidecar enforces this at runtime. `[implemented]`
 
 ```yaml
 permissions:
@@ -462,7 +485,7 @@ permissions:
     - "custom:snowflake.share_grant"   # custom: prefix for connector-specific
 ```
 
-If you POST a finding with a `type` that isn't in this list, the sidecar rejects it. This keeps the Scan Executions tab uniform without preventing extension. See **[finding schema](finding-schema.md)** for the built-in three.
+If you POST a finding with a `type` not in this list, the runtime sidecar drops it and logs the reason. The declared list is injected as `ALLOWED_FINDING_TYPES` at pod launch. See **[finding schema](finding-schema.md)** for the built-in types.
 
 ## Validation
 

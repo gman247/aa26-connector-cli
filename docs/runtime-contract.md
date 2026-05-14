@@ -2,6 +2,8 @@
 
 Your connector container talks to a **runtime sidecar** that runs in the same pod, on `http://127.0.0.1:8089`. That's the only place your container needs to send anything. The sidecar takes care of forwarding to AA26's internal services, authentication, retries, OTel logs, and control-signal polling.
 
+> **Implementation status:** All endpoints listed here are implemented unless noted otherwise. `POST /v1/classify` is [planned] — it is documented as a future interface and does not exist on the current sidecar.
+
 Use any HTTP client you want. `curl`, `requests`, `net/http`, `fetch`, `HttpClient` — all fine. The contract is what's documented here, not a particular SDK.
 
 ## The lifecycle

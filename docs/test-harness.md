@@ -1,5 +1,7 @@
 # Test Harness (`aa26-connector test`)
 
+> **Implementation status:** Basic invocation (scan operations, checkpoint, progress, findings emission) is [implemented]. The OAuth2 test path (token injection, mock provider, browser flow) is [planned] — see the warning blocks in this document for details. The `--probe-contract` fixture mode is [stub].
+
 The test harness runs your connector image **locally** against an
 in-process emulator that matches the production runtime contract. No
 cluster, no AA26 deploy, no round-trip — write a connector, build the

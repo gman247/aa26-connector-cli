@@ -2,6 +2,8 @@
 
 The CLI is the fastest path from "I want to write a connector" to "I have a working connector running locally". Five subcommands.
 
+> **Implementation status:** `new`, `validate`, `lint`, and `package` are fully implemented. `test` is [stub] — the local emulator runs basic scenarios but the OAuth2 browser-flow and `--probe-contract` fixture modes are not yet implemented.
+
 ```
 aa26-connector new <name> --lang=python|bash [--dir=PATH]
 aa26-connector validate [PATH]

@@ -1,5 +1,7 @@
 # Text extraction (Tika + OCR) from your connector
 
+> **Implementation status:** The extraction sidecar (`spec.capabilities.sidecars: [extraction]`) is fully implemented and verified with Dropbox and Google Workspace. The `spec.extraction.maxDepth` setting is [implemented]. The sidecar is only attached to sensitive-data-scan pods, not access-scan pods.
+
 The framework ships a per-Pod **extraction sidecar** so connectors that need to pull text out of files (PDF, DOCX, XLSX, PPTX, HTML, RTF, ePub, scanned images) don't have to bundle Apache Tika or Tesseract themselves. You opt in via your manifest, call a one-line SDK function from your worker, and the framework handles the rest — image bloat, JVM tuning, startup probes, OCR language packs.
 
 This is the right tool for any connector emitting `content`-bearing findings during sensitive-data scans (the input to the framework's classifier relay). If your connector doesn't deal with files (a permissions-only catalog scanner, a SaaS API that returns text directly), skip the sidecar — it costs ~768 MiB of pod memory.
