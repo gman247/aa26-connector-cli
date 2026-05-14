@@ -213,6 +213,75 @@ Same `x-` extensions as `credentials`. Any valid JSON Schema is allowed — `enu
 
 Per-execution overrides — the form shown when a user clicks **Run scan now** with custom parameters. Skip if your scans don't need user-tunable knobs.
 
+```yaml
+scan:
+  schema:
+    type: object
+    properties:
+      maxFileBytes:
+        type: integer
+        x-display: "Max file size (bytes) for SDS content download"
+        default: 1048576
+        minimum: 1024
+        maximum: 52428800
+      recipes:
+        type: array
+        items:
+          type: string
+          enum:
+            - active_credential
+            - payment_data
+            - regulated_identifier
+            - employee_record
+            - internal_directory
+            - contact_list
+            - personal_contact_info
+            - compensation_data
+            - health_information
+            - legal_contract
+        x-display: "Evidence AI recipes to run (empty = all)"
+        description: |
+          Restrict Evidence AI to specific sensitivity recipes for this scan.
+          Leave empty to run all enabled recipes (default behavior).
+      detectors:
+        type: array
+        items:
+          type: string
+        x-display: "Evidence AI detectors to run (empty = all)"
+        description: |
+          Reserved — accepted and stored but not yet applied by Evidence AI.
+          Leave empty. The recipe filter (above) is the current knob for
+          controlling what Evidence AI reports on a scan.
+```
+
+### How `recipes` and `detectors` reach Evidence AI
+
+When the runtime sidecar starts a sensitive-data scan it fires a one-time `POST /api/v1/runtime/subscribe` to the Evidence AI API. The `recipes` and `detectors` values are included in that body, keyed by `scan_execution_id`. Evidence AI caches them and applies the recipe filter to every `/classify` call it receives for that execution. The operator never touches env vars or per-file payloads — these two fields in the scan schema are the only knob.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `recipes` | `string[]` | Run only these Evidence AI recipes. `[]` or absent = all recipes. |
+| `detectors` | `string[]` | Reserved for future per-detector gating. Pass `[]` or omit. |
+
+### Available recipes
+
+| Recipe | Detects | Severity |
+|---|---|---|
+| `active_credential` | API keys, secrets, private keys | Critical |
+| `payment_data` | Credit cards, bank accounts, IBAN, SWIFT | Critical / High |
+| `regulated_identifier` | SSN, passport, driver's licence, national IDs | High |
+| `employee_record` | HR files — PII + salary / payroll | High |
+| `internal_directory` | Staff lists with name + email + phone | Medium |
+| `contact_list` | Customer / prospect contact lists | Medium |
+| `personal_contact_info` | Standalone PII (email, phone, DOB) | Medium / Low |
+| `compensation_data` | Salary data, compensation bands | High |
+| `health_information` | PHI — medical codes, clinical notes | Critical / High |
+| `legal_contract` | Contracts, NDAs, legal agreements (LLM) | High |
+
+!!! note "`legal_contract` requires an LLM client"
+    Without an LLM configured on the Evidence AI side this recipe is silently
+    skipped regardless of `recipe_filter`.
+
 ## `spec.resources`
 
 Standard k8s resources block applied to your container.
