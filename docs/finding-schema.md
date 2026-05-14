@@ -2,6 +2,8 @@
 
 Every event your connector emits goes through one envelope. There are three event kinds (`finding`, `progress`, `log`), and within `finding` there are three built-in archetypes (`access_grant`, `object_metadata`, `sensitive_match`) plus a `custom:` extension namespace. The full JSON Schema is at `https://connectors.netwrix.io/schema/finding.schema.json`.
 
+> **Implementation status:** `object_metadata` and `access_grant` are fully implemented and routed to ClickHouse. `sensitive_match` is accepted by the schema but [stored, not applied] — the runtime sidecar drops it. `custom:` types pass schema validation but have no routing destination yet [stored, not applied].
+
 ## The envelope
 
 Every event has these fields:

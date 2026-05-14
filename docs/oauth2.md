@@ -1,5 +1,7 @@
 # OAuth2 authentication
 
+> **Implementation status:** The OAuth2 engine is fully implemented and verified end-to-end with the Dropbox connector. The `revocationUrl` field is [stored, not applied] — the revoke endpoint is not called on source deletion yet. The `customAuthAdapter` escape hatch is [planned].
+
 When your connector talks to a SaaS data source that uses OAuth2 (Dropbox,
 Google Drive, M365, Salesforce, Slack, Box, GitHub, …) you do **not** write
 any OAuth code. You declare the provider in `connector.yaml` and the

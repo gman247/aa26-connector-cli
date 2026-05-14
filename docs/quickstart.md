@@ -1,5 +1,7 @@
 # Quickstart — your first connector in 15 minutes
 
+> **Implementation status:** This quickstart is fully working end-to-end. The connector you build here will run on the current cluster and write rows to ClickHouse.
+
 You'll build a connector that scans a directory and emits one finding per file. It's the simplest thing that exercises the whole framework. We'll write it in **bash** to make the point that you don't need to learn anything Netwrix-specific to ship a connector.
 
 You'll need:
