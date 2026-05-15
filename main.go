@@ -239,6 +239,22 @@ func cmdValidate(args []string) error {
 	if err := json.Unmarshal(jsonBytes, &doc); err != nil {
 		return fmt.Errorf("json decode: %w", err)
 	}
+	// Pre-flight: spec.image.tag was removed; the image tag is derived
+	// from metadata.version. The schema rejects manifests carrying tag,
+	// but its "additionalProperties not allowed" error is opaque the
+	// first time you see it. Give the same friendly remediation R007
+	// gives at lint time before the schema raises.
+	if docMap, ok := doc.(map[string]any); ok {
+		if spec, ok := docMap["spec"].(map[string]any); ok {
+			if img, ok := spec["image"].(map[string]any); ok {
+				if _, hasTag := img["tag"]; hasTag {
+					return fmt.Errorf("invalid:\n`spec.image.tag` is no longer supported — remove the line from %s. "+
+						"The image tag is derived from `metadata.version`. "+
+						"See docs/manifest-reference.md.", path)
+				}
+			}
+		}
+	}
 	if err := schema.Validate(doc); err != nil {
 		return fmt.Errorf("invalid:\n%s", err)
 	}

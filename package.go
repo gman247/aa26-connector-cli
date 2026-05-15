@@ -56,7 +56,6 @@ func cmdPackage(args []string) error {
 		Spec struct {
 			Image struct {
 				Repository string `json:"repository"`
-				Tag        string `json:"tag"`
 			} `json:"image"`
 		} `json:"spec"`
 	}

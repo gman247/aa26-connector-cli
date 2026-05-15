@@ -159,7 +159,7 @@ Validates the manifest first, runs `docker save` on the image declared in `spec.
 
 The bundle filename is the upload UI and registry's lookup key for the version. A custom `--out=mybuild.tar.gz` strips that version, so the on-disk file, the manifest, and the installed image can all disagree about which build is actually deployed. `package` rejects `--out` values that don't match the expected name.
 
-If your manifest still carries a `spec.image.tag` line (from before the field was removed), schema validation will fail with a clear "additional property not allowed" error and `aa26-connector lint` rule R007 names the exact line to remove.
+If your manifest still carries a `spec.image.tag` line (from before the field was removed), `aa26-connector validate` and `aa26-connector lint` (rule R007) both surface a clear "remove the line" remediation pointing at the right place to fix.
 
 `aa26-connector lint` rule **R007** warns at lint time so authors don't have to wait for the package step to discover the mismatch.
 
