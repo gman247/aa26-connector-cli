@@ -141,7 +141,7 @@ func cmdPackage(args []string) error {
 	}
 	bundleInfo, _ := os.Stat(out)
 	fmt.Printf("✓ wrote %s (%.1f MB)\n", out, float64(bundleInfo.Size())/(1024*1024))
-	fmt.Printf("\nUpload it: https://20.169.152.226.nip.io/connector-upload/\n")
+	fmt.Printf("\nUpload it to /connector-upload/ on your DSPM cluster.\n")
 	return nil
 }
 

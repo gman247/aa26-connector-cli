@@ -1,8 +1,6 @@
 # Uploading a connector
 
-The fastest path from "I built a connector" to "AA26 admins can use it" is the upload UI:
-
-**[https://20.169.152.226.nip.io/connector-upload/](https://20.169.152.226.nip.io/connector-upload/)**
+The fastest path from "I built a connector" to "AA26 admins can use it" is the upload UI at `/connector-upload/` on your DSPM cluster.
 
 You'll also see a **+ Add New Source** button in AA26's webapp under **Configuration → Sources → Create Source Group** that opens this page in a new tab.
 
@@ -64,7 +62,7 @@ Two paths.
 
 ```bash
 curl -F "bundle=@my-connector-0.1.0.tar.gz" \
-     https://20.169.152.226.nip.io/connector-upload/api/upload
+     https://<your-dspm-cluster>/connector-upload/api/upload
 ```
 
 Response on success:

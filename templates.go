@@ -246,6 +246,6 @@ aa26-connector test --root=/tmp
 
 ## Publish
 
-See https://20.169.152.226.nip.io/connector-docs/publishing/ for the
+See /connector-docs/publishing/ on your DSPM cluster for the
 filesystem-drop and OCI registry paths.
 `

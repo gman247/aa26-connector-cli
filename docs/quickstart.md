@@ -127,7 +127,7 @@ aa26-connector package
 # → wrote hello-fs-0.1.0.tar.gz
 ```
 
-Open https://20.169.152.226.nip.io/connector-upload/ and drop the tarball on the upload zone. Within 5 seconds the **Installed connectors** table shows your new entry; within ~10 seconds AA26's webapp picker has a card for it.
+Open `/connector-upload/` on your DSPM cluster and drop the tarball on the upload zone. Within 5 seconds the **Installed connectors** table shows your new entry; within ~10 seconds AA26's webapp picker has a card for it.
 
 If you'd rather skip the bundling and have shell access to the host, you can also drop the manifest directly into the watch directory:
 
@@ -136,13 +136,7 @@ sudo mkdir -p /var/lib/aa26/connectors/hello-fs
 sudo cp connector.yaml /var/lib/aa26/connectors/hello-fs/
 ```
 
-Either way, the registry picks it up within ~10 seconds. Confirm via:
-
-```bash
-curl -s https://20.169.152.226.nip.io/connector-upload/api/list | jq '.connectors[] | select(.name=="hello-fs")'
-```
-
-You should see `"state": "Ready"`. If you see `"InvalidManifest"`, the `reason` field tells you what's wrong. The most common one is forgetting `apiVersion: connectors.netwrix.io/v1`.
+Either way, the registry picks it up within ~10 seconds.
 
 See **[uploading](uploading.md)** for the full upload flow including delete and trust model.
 

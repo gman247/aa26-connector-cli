@@ -51,7 +51,7 @@ The framework you're reading about does the opposite of all of that. It picks an
 
 ## Already have a tarball?
 
-[Drop it at `/connector-upload/`](https://20.169.152.226.nip.io/connector-upload/) — same UI you reach via the **+ Add New Source** button on `/configuration/sources`.
+Drop it at `/connector-upload/` on your DSPM cluster — same UI you reach via the **+ Add New Source** button on `/configuration/sources`.
 
 ## Status
 
