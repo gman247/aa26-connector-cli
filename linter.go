@@ -309,35 +309,23 @@ func defaultRules() []lintRule {
 			},
 		},
 
-		// R007: floating image tag (`:dev`, `:latest`) on a connector
-		// manifest. Symptoms when this bites: a new connector version
-		// uploads successfully, the source_types row registers, but
-		// pods spawned from it run a stale image because the floating
-		// tag still resolves to whichever blob was imported last.
-		// kubelet's pullPolicy: Never doesn't error — the tag resolves
-		// fine, just to the wrong bytes. The new version's bug fixes
-		// are invisible, with no warning at any layer.
-		// Real-world incident: dropbox-0.2.1 shipped with v0.2.0's
-		// compiled code on the dev cluster for one full scan cycle
-		// before anyone noticed. See docs/manifest-reference.md
-		// "Versioned image tags".
+		// R007: `spec.image.tag` is no longer accepted. The image tag is
+		// derived from `metadata.version` so the manifest and the running
+		// image can never disagree. Old manifests carrying a `tag:` line
+		// under `spec.image:` need it removed before `aa26-connector
+		// package` or registry upload will succeed.
 		//
 		// Scope to connector manifests via the apiVersion anchor.
-		// Warns (not errors) because there are legitimate reasons to
-		// float — cluster operators who deliberately want
-		// "rebuild-and-restart picks up the latest image" — but the
-		// warning makes the choice explicit. `aa26-connector package`
-		// enforces strictly at package time regardless.
 		ruleNearby(
 			"R007",
-			"warn",
+			"error",
 			[]string{".yaml", ".yml"},
-			regexp.MustCompile(`^\s{4}tag:\s*(dev|latest)\s*$`),
+			regexp.MustCompile(`^\s{4}tag:\s*\S`),
 			regexp.MustCompile(`^apiVersion:\s*connectors\.netwrix\.io`),
 			200,
-			"`spec.image.tag` is a floating tag (`dev`/`latest`). "+
-				"Pin it to `metadata.version` so kubelet can't silently run a stale image when "+
-				"the connector version bumps. See docs/manifest-reference.md `Versioned image tags`.",
+			"`spec.image.tag` is no longer supported — remove the line. "+
+				"The image tag is derived from `metadata.version`. "+
+				"See docs/manifest-reference.md.",
 		),
 	}
 }

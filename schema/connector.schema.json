@@ -54,12 +54,12 @@
         "image": {
           "type": "object",
           "required": ["repository"],
+          "additionalProperties": false,
           "properties": {
             "repository": {
               "type": "string",
-              "description": "OCI image reference without tag/digest, e.g. ghcr.io/netwrix/connectors/box."
+              "description": "OCI image reference without tag/digest, e.g. ghcr.io/netwrix/connectors/box. The image tag is derived from metadata.version; do not declare it here."
             },
-            "tag":    { "type": "string" },
             "digest": {
               "type": "string",
               "pattern": "^sha256:[a-f0-9]{64}$",
@@ -395,13 +395,13 @@
                 "properties": {
                   "target": {
                     "type": "string",
-                    "enum": ["entities"],
-                    "description": "v1 supports only the entities table. v2 will allow access_grant and other shapes."
+                    "enum": ["entities", "permissions"],
+                    "description": "Ingestion target table. 'entities' for object inventory; 'permissions' for access_grant rows."
                   },
                   "mapping": {
                     "type": "object",
                     "additionalProperties": false,
-                    "description": "Map from entities columns to a JSON path expression evaluated against each finding event. Only the cross-domain allow-list is permitted; see ingestion-mapping-v1.md §4.1.",
+                    "description": "Map from table columns to a JSON path expression evaluated against each finding event. For target=entities: cross-domain allow-list (see ingestion-mapping-v1.md §4.1). For target=permissions: permission grant columns.",
                     "properties": {
                       "name":                 { "$ref": "#/$defs/jsonPathExpr" },
                       "description":          { "$ref": "#/$defs/jsonPathExpr" },
@@ -421,7 +421,16 @@
                       "contentHashAlgorithm": { "$ref": "#/$defs/jsonPathExpr" },
                       "createdDate":          { "$ref": "#/$defs/jsonPathExpr" },
                       "modifiedDate":         { "$ref": "#/$defs/jsonPathExpr" },
-                      "lastAccessedDate":     { "$ref": "#/$defs/jsonPathExpr" }
+                      "lastAccessedDate":     { "$ref": "#/$defs/jsonPathExpr" },
+                      "permissionGrantId":    { "$ref": "#/$defs/jsonPathExpr" },
+                      "aceType":              { "$ref": "#/$defs/jsonPathExpr" },
+                      "memberRole":           { "$ref": "#/$defs/jsonPathExpr" },
+                      "readAllowed":          { "$ref": "#/$defs/jsonPathExpr" },
+                      "writeAllowed":         { "$ref": "#/$defs/jsonPathExpr" },
+                      "deleteAllowed":        { "$ref": "#/$defs/jsonPathExpr" },
+                      "manageAllowed":        { "$ref": "#/$defs/jsonPathExpr" },
+                      "adminAllowed":         { "$ref": "#/$defs/jsonPathExpr" },
+                      "listAllowed":          { "$ref": "#/$defs/jsonPathExpr" }
                     }
                   },
                   "additionalProperties": {

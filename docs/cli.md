@@ -119,7 +119,7 @@ worker | wrote 97 findings
 
 The emulator captures everything your connector POSTs and prints a summary. The coverage table shows which sidecar endpoints your worker actually hit — a cheap way to spot untested code paths. On first-call failures (worker exits non-zero before `/v1/complete`), the summary includes a **forensic block** with the last sidecar interaction, recent worker output, and a heuristic root-cause hint.
 
-Required: a built image matching `spec.image.repository:spec.image.tag` from your manifest. Tag defaults to `dev` if omitted in the manifest.
+Required: a built image matching `spec.image.repository:<metadata.version>` from your manifest. The tag is always `metadata.version` — see [manifest-reference.md](manifest-reference.md#image-tag--metadataversion).
 
 ### Flags
 
@@ -150,27 +150,16 @@ Validates the manifest first, runs `docker save` on the image declared in `spec.
 
 ### Version invariant — enforced
 
-`package` refuses to bundle unless three identifiers agree:
+`package` refuses to bundle unless two identifiers agree:
 
 | Field | Required value |
 |---|---|
-| `metadata.version` | the connector's semver |
-| `spec.image.tag` | **same string** as `metadata.version` |
+| `metadata.version` | the connector's semver — also drives the image tag |
 | Output filename | `<metadata.name>-<metadata.version>.tar.gz` |
 
-If `spec.image.tag` is missing, set to `dev`/`latest`, or doesn't match `metadata.version`, the command fails with a clear remediation message before running `docker save`. The reason for the rule is non-obvious until it bites: kubelet's `pullPolicy: Never` resolves a floating tag like `:dev` to *whichever blob was imported last* into the cluster's containerd cache, not the image the new version was built from. The new version's source_type row registers correctly, but pods spawned from it run stale code, with no error from kubelet at any layer.
+The bundle filename is the upload UI and registry's lookup key for the version. A custom `--out=mybuild.tar.gz` strips that version, so the on-disk file, the manifest, and the installed image can all disagree about which build is actually deployed. `package` rejects `--out` values that don't match the expected name.
 
-The same logic applies to the bundle filename: the upload UI and the registry both display the version they parse from `<name>-<version>.tar.gz`. A custom `--out=mybuild.tar.gz` strips that version, so the on-disk file, the manifest, and the installed image can all disagree about which build is actually deployed. `package` rejects `--out` values that don't match the expected name.
-
-```bash
-# Concrete failure shape — copy-paste fixable
-$ aa26-connector package
-✗ spec.image.tag ("dev") must equal metadata.version ("0.5.0"). Floating
-  or version-mismatched tags silently install stale code (kubelet's
-  pullPolicy:Never resolves the tag to whichever blob was imported last,
-  not the image you just built). Update connector.yaml so both fields are
-  "0.5.0", then re-run `aa26-connector package`.
-```
+If your manifest still carries a `spec.image.tag` line (from before the field was removed), schema validation will fail with a clear "additional property not allowed" error and `aa26-connector lint` rule R007 names the exact line to remove.
 
 `aa26-connector lint` rule **R007** warns at lint time so authors don't have to wait for the package step to discover the mismatch.
 

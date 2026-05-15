@@ -36,7 +36,6 @@ metadata:
 spec:
   image:
     repository: localhost/hello-fs
-    tag: dev
     pullPolicy: Never
   capabilities:
     operations: [test_connection, scan]

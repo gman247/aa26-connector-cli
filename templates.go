@@ -13,7 +13,6 @@ metadata:
 spec:
   image:
     repository: localhost/%s
-    tag: dev
     pullPolicy: Never
   capabilities:
     operations: [test_connection, scan]

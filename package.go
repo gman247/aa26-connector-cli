@@ -67,33 +67,13 @@ func cmdPackage(args []string) error {
 		return errors.New("manifest is missing metadata.name or metadata.version")
 	}
 
-	// Enforce version/tag/filename invariant. The bug class this
-	// prevents: a connector author bumps metadata.version but forgets
-	// to bump spec.image.tag, leaving it on `dev` or an older version.
-	// At install time kubelet's pullPolicy:Never resolves the floating
-	// or stale tag to whichever blob was imported last, NOT the image
-	// the new version was built from. The new code never runs; no error
-	// surfaces. Real-world incident: dropbox-0.2.1 shipped with v0.2.0's
-	// compiled bytes on the dev cluster for a full scan cycle before
-	// anyone noticed. See docs/manifest-reference.md "Versioned image tags".
-	if m.Spec.Image.Tag == "" {
-		return fmt.Errorf(
-			"spec.image.tag is required and must equal metadata.version (%q). "+
-				"Add `tag: %s` under spec.image in %s.",
-			m.Metadata.Version, m.Metadata.Version, manifestPath,
-		)
-	}
-	if m.Spec.Image.Tag != m.Metadata.Version {
-		return fmt.Errorf(
-			"spec.image.tag (%q) must equal metadata.version (%q). "+
-				"Floating or version-mismatched tags silently install stale code "+
-				"(kubelet's pullPolicy:Never resolves the tag to whichever blob was "+
-				"imported last, not the image you just built). Update %s so both fields "+
-				"are %q, then re-run `aa26-connector package`.",
-			m.Spec.Image.Tag, m.Metadata.Version, manifestPath, m.Metadata.Version,
-		)
-	}
-	tag := m.Spec.Image.Tag
+	// metadata.version is the single source of truth for the image tag.
+	// Authors don't declare it twice; that historically let the manifest
+	// drift from the actually-built image (e.g. dropbox-0.2.1 shipped
+	// with v0.2.0's compiled bytes on the dev cluster for a full scan
+	// cycle because spec.image.tag stayed on `dev` while metadata.version
+	// bumped). The image reference is now derived here.
+	tag := m.Metadata.Version
 	imageRef := m.Spec.Image.Repository + ":" + tag
 
 	// The bundle filename is the canonical lookup key the upload UI

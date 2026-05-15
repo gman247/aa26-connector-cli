@@ -42,7 +42,6 @@ metadata:
 spec:
   image:
     repository: ghcr.io/<your-org>/dropbox-connector
-    tag: 0.1.0
 
   capabilities:
     scanTypes: [access_scan, sensitive_data_scan]

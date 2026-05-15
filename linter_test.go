@@ -195,21 +195,21 @@ spec:
 	}
 }
 
-func TestLint_R007_FloatingImageTag(t *testing.T) {
-	// `tag: dev` on a connector manifest is the floating-tag footgun
-	// that silently installs stale images. R007 warns at lint time
-	// (and `aa26-connector package` rejects strictly at package time).
-	for _, bad := range []string{"dev", "latest"} {
-		t.Run("tag="+bad, func(t *testing.T) {
+func TestLint_R007_DeprecatedTagField(t *testing.T) {
+	// `spec.image.tag` is no longer accepted; the image tag is derived
+	// from metadata.version. R007 errors at lint time (and the schema
+	// rejects at validate/package/upload time).
+	for _, val := range []string{"dev", "latest", "0.5.0", "1.0.0-rc.1"} {
+		t.Run("tag="+val, func(t *testing.T) {
 			src := `apiVersion: connectors.netwrix.io/v1
 kind: Connector
 metadata:
-  name: floaty
+  name: oldstyle
   version: 0.5.0
 spec:
   image:
-    repository: localhost/floaty
-    tag: ` + bad + `
+    repository: localhost/oldstyle
+    tag: ` + val + `
     pullPolicy: Never
 `
 			dir := writeLintFiles(t, map[string]string{"connector.yaml": src})
@@ -219,43 +219,38 @@ spec:
 			}
 			hasR007 := false
 			for _, f := range got {
-				if f.Rule == "R007" && f.Severity == "warn" {
+				if f.Rule == "R007" && f.Severity == "error" {
 					hasR007 = true
 				}
 			}
 			if !hasR007 {
-				t.Errorf("expected R007 warn for tag=%s, got %+v", bad, got)
+				t.Errorf("expected R007 error for tag=%s, got %+v", val, got)
 			}
 		})
 	}
 }
 
-func TestLint_R007_NoFalsePositiveOnVersionedTag(t *testing.T) {
-	// Pinned semver tag — must not fire. Three flavors that should
-	// all pass: bare semver, pre-release, build metadata.
-	for _, good := range []string{"0.5.0", "1.2.0", "2.0.0-rc.1", "1.0.0+build.42"} {
-		t.Run("tag="+good, func(t *testing.T) {
-			src := `apiVersion: connectors.netwrix.io/v1
+func TestLint_R007_NoFalsePositiveWhenTagAbsent(t *testing.T) {
+	// Manifest with no spec.image.tag — the new normal — must not fire.
+	src := `apiVersion: connectors.netwrix.io/v1
 kind: Connector
 metadata:
-  name: pinned
-  version: ` + good + `
+  name: clean
+  version: 1.2.0
 spec:
   image:
-    repository: localhost/pinned
-    tag: ` + good + `
+    repository: localhost/clean
+    pullPolicy: Never
 `
-			dir := writeLintFiles(t, map[string]string{"connector.yaml": src})
-			got, err := Lint(LintConfig{Root: dir})
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, f := range got {
-				if f.Rule == "R007" {
-					t.Errorf("R007 false positive on tag=%s: %+v", good, f)
-				}
-			}
-		})
+	dir := writeLintFiles(t, map[string]string{"connector.yaml": src})
+	got, err := Lint(LintConfig{Root: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range got {
+		if f.Rule == "R007" {
+			t.Errorf("R007 false positive on manifest without tag: %+v", f)
+		}
 	}
 }
 

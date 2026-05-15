@@ -31,7 +31,6 @@ In your `connector.yaml`:
 spec:
   image:
     repository: localhost/my-connector
-    tag: dev
     pullPolicy: Never                 # important — don't try to pull
 ```
 
@@ -54,7 +53,6 @@ In your `connector.yaml`:
 spec:
   image:
     repository: ghcr.io/myorg/connectors/my-connector
-    tag: 1.2.0
     digest: sha256:abc123...                    # required for signed installs
     pullPolicy: IfNotPresent                    # default
     signing:
@@ -62,6 +60,8 @@ spec:
         certificateIdentity: https://github.com/myorg/connectors/.github/workflows/release.yaml@refs/tags/v1.2.0
         certificateOidcIssuer: https://token.actions.githubusercontent.com
 ```
+
+The image tag is derived from `metadata.version` — push your image under that same tag (e.g. `ghcr.io/myorg/connectors/my-connector:1.2.0` when `metadata.version: 1.2.0`).
 
 For unsigned community connectors the cluster operator has to opt in via `allowUnverifiedConnectors: true`. First-party / vendor connectors are expected to be signed.
 

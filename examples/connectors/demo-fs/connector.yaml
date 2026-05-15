@@ -12,7 +12,6 @@ metadata:
 spec:
   image:
     repository: localhost/connector-prototype/demo-fs
-    tag: dev
     pullPolicy: Never
   capabilities:
     operations: [test_connection, scan]

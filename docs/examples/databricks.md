@@ -17,7 +17,6 @@ metadata:
 spec:
   image:
     repository: localhost/connector-prototype/databricks
-    tag: dev
     pullPolicy: Never
   capabilities:
     scanTypes: [access_scan, sync]

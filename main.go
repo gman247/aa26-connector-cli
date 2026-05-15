@@ -707,7 +707,6 @@ func loadManifestForTest(path string) (*manifestSummary, error) {
 		Spec struct {
 			Image struct {
 				Repository string `json:"repository"`
-				Tag        string `json:"tag"`
 				PullPolicy string `json:"pullPolicy"`
 			} `json:"image"`
 			Capabilities struct {
@@ -722,10 +721,7 @@ func loadManifestForTest(path string) (*manifestSummary, error) {
 	if err := json.Unmarshal(jsonBytes, &m); err != nil {
 		return nil, fmt.Errorf("manifest decode: %w", err)
 	}
-	tag := m.Spec.Image.Tag
-	if tag == "" {
-		tag = "dev"
-	}
+	tag := m.Metadata.Version
 	var rawDoc map[string]any
 	_ = json.Unmarshal(jsonBytes, &rawDoc)
 	sourceTypes, _ := ParseSourceTypes(rawDoc)
